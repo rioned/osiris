@@ -37,9 +37,9 @@ export default function UserMenu({ onOpenLogin, onOpenAdmin, onOpenPlugins }: { 
     return (
       <button
         onClick={onOpenLogin}
-        className="pointer-events-auto glass-panel px-2 py-1 flex items-center gap-1.5 text-[8px] font-mono tracking-widest hover:border-[var(--gold-primary)]/40 transition-all border-white/5"
+        className="pointer-events-auto glass-panel px-3 py-1.5 flex items-center gap-2 text-[11px] font-mono tracking-widest hover:border-[var(--gold-primary)]/40 transition-all border-white/5"
       >
-        <User className="w-2.5 h-2.5 text-[var(--gold-primary)]" />
+        <User className="w-3.5 h-3.5 text-[var(--gold-primary)]" />
         <span className="text-[var(--gold-primary)] font-bold">LOGIN</span>
       </button>
     );
@@ -49,20 +49,20 @@ export default function UserMenu({ onOpenLogin, onOpenAdmin, onOpenPlugins }: { 
     <div ref={menuRef} className="relative pointer-events-auto">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="glass-panel px-2 py-1 flex items-center gap-1.5 text-[8px] font-mono tracking-widest hover:border-[var(--gold-primary)]/40 transition-all border-white/5"
+        className="glass-panel px-3 py-1.5 flex items-center gap-2 text-[11px] font-mono tracking-widest hover:border-[var(--gold-primary)]/40 transition-all border-white/5"
       >
         <span
-          className="w-1.5 h-1.5 rounded-full"
+          className="w-2 h-2 rounded-full"
           style={{ backgroundColor: ROLE_COLORS[user.role] }}
         />
-        <span className="text-white/80 font-bold truncate max-w-[60px]">{user.username}</span>
+        <span className="text-white/90 font-bold truncate max-w-[90px]">{user.username}</span>
         <span
-          className="px-1 rounded text-[7px] font-bold"
+          className="px-1.5 py-0.5 rounded text-[9px] font-bold"
           style={{ backgroundColor: `${ROLE_COLORS[user.role]}20`, color: ROLE_COLORS[user.role] }}
         >
           {ROLE_BADGES[user.role]}
         </span>
-        <ChevronDown className={`w-2 h-2 text-white/40 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        <ChevronDown className={`w-3 h-3 text-white/40 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
 
       <AnimatePresence>
