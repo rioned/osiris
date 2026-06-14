@@ -448,6 +448,24 @@ docker builder prune -af
 
 12. **LLM fine-tuning** — Train a domain-specific model on OSINT report corpora for improved entity extraction, relationship inference, and false-positive reduction in the ontology engine.
 
+13. **Social media connector suite** — First-class ingestion connectors for **X/Twitter, YouTube, Facebook, LinkedIn, and WhatsApp**, plus bulk importers for **person IDs, phone contact lists, and persons-and-their-jobs rosters**. Each connector pulls posts, comments, replies, reactions, follower/following lists, group membership, and the surrounding **metadata** (timestamps, geotags, device hints, handles, profile fields) and hands the raw, **unstructured** payload to the existing `/api/ai/ontology-query` `ingest` action for entity + relationship extraction.
+
+14. **Cross-platform identity resolution** — Unify the *same real person* across every source into a single ontology node — fusing X handle, Facebook/LinkedIn profile, WhatsApp number, phone-contact entry, and national ID via fuzzy name/alias matching, shared phone/email, photo similarity, and behavioural fingerprints — with a confidence score and a manual merge/split review queue so one human maps to one entity.
+
+15. **Social interaction graph reconstruction** — Promote social activity into typed, directional relationships in the ontology graph: `follows`, `friend_of`, `liked`, `commented_on`, `replied_to`, `shared`, `mentioned`, `tagged`, `member_of`, `works_at`. This turns scattered feeds into a queryable network — *who follows whom*, *who commented on which YouTube post*, *who co-occurs in which groups* — that the graph-analytics layer (communities, centrality, pathfinding) already operates on.
+
+16. **Content NLP enrichment pipeline** — Run every ingested post/comment/bio through language detection, translation, named-entity recognition, topic modelling, and toxicity/abuse scoring — attaching structured tags to otherwise unstructured text so downstream queries can filter by topic, language, and entities mentioned.
+
+17. **Target-stance & opinion mining** — Aspect-based sentiment that scores **how each person feels about a specific target** (a country, organisation, person, or topic) by aggregating the stance of their posts, comments, likes, and shares. Produces per-entity opinion profiles — e.g. *attitude toward Rwanda: negative (0.82, from 14 posts / 9 comments)* — that become first-class, filterable properties on the person node.
+
+18. **Natural-language data-crossing engine (GraphRAG)** — A question-answering layer that translates a plain-language ask into a multi-hop graph traversal + vector retrieval over the unified ontology, then synthesises an answer with citations back to the source posts. This is the headline cross-system capability: ask *"give me the list of users who don't like Rwanda"* and it crosses stance scores, who-follows-whom, comment threads, and shared groups to return a ranked, evidence-backed list — the same engine answering *"who commented on this YouTube post and also follows X?"* or *"which contacts of this person work at the same company?"*.
+
+19. **Behavioural & temporal profiling** — Per-entity timelines and activity baselines across all platforms (posting rhythm, active hours, location trail from geotags, sudden topic shifts) — surfacing coordinated activity, sock-puppet clusters, and anomalies for review.
+
+20. **Influence & narrative analytics** — Build on the graph-analytics engine to detect **opinion communities** and the **influencers** driving a narrative — who originates a stance, how it propagates through follows/shares/comments, and which bridge accounts connect otherwise separate audiences.
+
+21. **Provenance, consent & legal guardrails** — Because this fuses sensitive personal data, track the **source, collection method, timestamp, and legal basis/consent** for every ingested record; enforce per-source retention windows, role-scoped access to person profiles, full audit logging of who queried what, and one-click subject export/erasure — keeping the cross-data system accountable and compliant.
+
 ---
 
 ## License
