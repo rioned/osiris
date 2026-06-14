@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect, memo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import dynamic from 'next/dynamic';
 import {
@@ -8,7 +8,8 @@ import {
   User, Phone, AtSign, CreditCard, Car, MapPin,
   Wifi, Globe, Calendar, Image, Search, Plus,
   Network, Eye, EyeOff, Crosshair, RefreshCw, Layers,
-  MessageCircle, Send, Bot, Share2, GitBranch
+  MessageCircle, Send, Bot, Share2, GitBranch,
+  Activity, Users, Route, Zap
 } from 'lucide-react';
 import {
   PersonalEntity, PersonalEntityType, PersonalGraphData,
@@ -18,7 +19,20 @@ import {
   loadPersonalStore, savePersonalStore, buildGraph,
   crossReferenceStore, generateEntityId, makeRelationship,
 } from '@/lib/personal-ontology';
+import {
+  analyzeGraph, findShortestPath, communityColor,
+  type GraphAnalyticsResult, type PathResult,
+} from '@/lib/graph-analytics';
 import { useAuth } from './AuthProvider';
+
+type CentralityMetric = 'degree' | 'betweenness' | 'closeness' | 'eigenvector';
+
+const CENTRALITY_LABELS: Record<CentralityMetric, string> = {
+  degree: 'DEGREE',
+  betweenness: 'BETWEENNESS',
+  closeness: 'CLOSENESS',
+  eigenvector: 'EIGENVECTOR',
+};
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false });
 const LinkEditorGraph = dynamic(() => import('./LinkEditorGraph'), { ssr: false });
@@ -61,6 +75,17 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // ── Advanced graph analytics state ──
+  // Community detection (Louvain), centrality scoring and pathfinding all run
+  // client-side over the in-memory store, so they layer on top of the existing
+  // force graph without any server round-trip or change to the data model.
+  const [showAnalytics, setShowAnalytics] = useState(false);
+  const [centralityMetric, setCentralityMetric] = useState<CentralityMetric>('degree');
+  // Pathfinding: pick two nodes on the canvas to reveal how they connect.
+  const [pathMode, setPathMode] = useState(false);
+  const [pathSource, setPathSource] = useState<string | null>(null);
+  const [pathTarget, setPathTarget] = useState<string | null>(null);
 
   // Load store on mount (and when the active user changes — workspace isolation)
   useEffect(() => {
@@ -128,11 +153,27 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
 
   const handleNodeClick = useCallback((node: any) => {
     const n = node as PersonalGraphNode;
+    // Pathfinding pick mode: first click sets the source, second the target.
+    if (pathMode) {
+      setPathSource(prevSrc => {
+        if (!prevSrc) { setPathTarget(null); return n.id; }
+        if (prevSrc === n.id) return prevSrc;
+        setPathTarget(n.id);
+        return prevSrc;
+      });
+      return;
+    }
     setSelectedNode(n);
     if (graphRef.current) {
       graphRef.current.centerAt(n.x, n.y, 500);
       graphRef.current.zoom(3, 500);
     }
+  }, [pathMode]);
+
+  // Clear all pathfinding selections.
+  const clearPath = useCallback(() => {
+    setPathSource(null);
+    setPathTarget(null);
   }, []);
 
   const handleLocateNode = useCallback((node: PersonalGraphNode) => {
@@ -219,32 +260,91 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
 
   const displayGraph: PersonalGraphData = { nodes: typeFilteredNodes, links: typeFilteredLinks };
 
+  // ── Analytics computation ──
+  // Runs Louvain community detection + centrality over the raw store graph
+  // (string-id links, before the force layout mutates them into object refs).
+  // Memoised on the entity/relationship counts so it only recomputes when the
+  // graph actually changes — keeps the force simulation smooth.
+  const analytics: GraphAnalyticsResult | null = useMemo(() => {
+    if (!showAnalytics || store.entities.length === 0) return null;
+    return analyzeGraph({
+      nodes: store.entities.map(e => ({ id: e.id })),
+      links: store.relationships.map(r => ({ source: r.sourceId, target: r.targetId, strength: r.strength })),
+    });
+  }, [showAnalytics, store.entities.length, store.relationships.length]);
+
+  // Shortest path between the two picked endpoints.
+  const pathResult: PathResult | null = useMemo(() => {
+    if (!pathSource || !pathTarget) return null;
+    return findShortestPath(
+      {
+        nodes: store.entities.map(e => ({ id: e.id })),
+        links: store.relationships.map(r => ({ source: r.sourceId, target: r.targetId, strength: r.strength })),
+      },
+      pathSource, pathTarget,
+    );
+  }, [pathSource, pathTarget, store.entities.length, store.relationships.length]);
+
+  // Fast lookups used by the canvas painters.
+  const pathNodeSet = useMemo(() => new Set(pathResult?.path || []), [pathResult]);
+  const pathEdgeSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const [a, b] of pathResult?.edges || []) {
+      s.add(`${a}>${b}`); s.add(`${b}>${a}`);
+    }
+    return s;
+  }, [pathResult]);
+
+  const selectedCentrality = analytics?.centrality?.[centralityMetric] || null;
+
+  const entityLabelById = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const e of store.entities) m[e.id] = e.label;
+    return m;
+  }, [store.entities]);
+
   // Node painter
   const paintNode = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const n = node as PersonalGraphNode;
     const isSelected = n === selectedNode;
-    const color = PERSONAL_TYPE_COLORS[n.type] || '#888';
-    const size = isSelected ? 6 : 4;
+
+    // In analytics mode, colour by community and size by the chosen centrality
+    // metric; otherwise keep the original per-type colouring.
+    const community = analytics?.community.communityOf[n.id];
+    const baseColor = PERSONAL_TYPE_COLORS[n.type] || '#888';
+    const color = showAnalytics && community !== undefined ? communityColor(community) : baseColor;
+
+    let size = isSelected ? 6 : 4;
+    if (showAnalytics && selectedCentrality) {
+      // Scale radius 3..11 by centrality so influential nodes pop visually.
+      size = 3 + (selectedCentrality[n.id] || 0) * 8 + (isSelected ? 2 : 0);
+    }
+
+    // Pathfinding endpoints / route emphasis.
+    const isPathEndpoint = n.id === pathSource || n.id === pathTarget;
+    const isOnPath = pathNodeSet.has(n.id);
+    if (isOnPath) size = Math.max(size, 5.5);
 
     ctx.beginPath();
     ctx.arc(n.x!, n.y!, size, 0, 2 * Math.PI);
     ctx.fillStyle = color;
     ctx.fill();
-    ctx.strokeStyle = isSelected ? '#fff' : 'rgba(0,0,0,0.8)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = isPathEndpoint ? '#FFD166' : isOnPath ? '#00E5FF' : isSelected ? '#fff' : 'rgba(0,0,0,0.8)';
+    ctx.lineWidth = isPathEndpoint || isOnPath ? 2 : 1;
     ctx.stroke();
 
-    if (isSelected) {
-      ctx.shadowColor = color;
+    if (isSelected || isPathEndpoint || isOnPath) {
+      const glow = isPathEndpoint ? '#FFD166' : isOnPath ? '#00E5FF' : color;
+      ctx.shadowColor = glow;
       ctx.shadowBlur = 20;
       ctx.beginPath(); ctx.arc(n.x!, n.y!, size + 4, 0, 2 * Math.PI);
-      ctx.strokeStyle = `${color}60`;
+      ctx.strokeStyle = `${glow}60`;
       ctx.lineWidth = 1.5; ctx.stroke();
       ctx.shadowBlur = 0;
     }
 
     const fontSize = Math.max(11 / globalScale, 3);
-    if (fontSize > 3.5 || isSelected) {
+    if (fontSize > 3.5 || isSelected || isPathEndpoint) {
       ctx.font = `${isSelected ? 'bold ' : ''}${fontSize}px 'JetBrains Mono', monospace`;
       const label = n.label.length > 24 ? n.label.slice(0, 22) + '…' : n.label;
       const textWidth = ctx.measureText(label).width;
@@ -253,16 +353,32 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
       ctx.fillStyle = isSelected ? '#fff' : color;
       ctx.fillText(label, n.x!, n.y! + size + 5);
     }
-  }, [selectedNode]);
+  }, [selectedNode, showAnalytics, analytics, selectedCentrality, pathSource, pathTarget, pathNodeSet]);
 
   const paintLink = useCallback((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const s = link.source; const t = link.target;
     if (!s.x || !t.x) return;
+    const sId = typeof s === 'string' ? s : s.id;
+    const tId = typeof t === 'string' ? t : t.id;
+    const onPath = pathEdgeSet.has(`${sId}>${tId}`);
+
     ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y);
-    ctx.strokeStyle = `rgba(255,255,255,${Math.max(0.05, link.strength || 0.1)})`;
+    if (onPath) {
+      // Highlight the discovered route between the two picked entities.
+      ctx.strokeStyle = '#00E5FF';
+      ctx.lineWidth = Math.max(1.5, 3 / globalScale);
+      ctx.shadowColor = '#00E5FF';
+      ctx.shadowBlur = 8;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      return;
+    }
+    // Dim non-path edges while a path is shown, to make the route stand out.
+    const dim = pathResult?.reachable ? 0.04 : Math.max(0.05, link.strength || 0.1);
+    ctx.strokeStyle = `rgba(255,255,255,${dim})`;
     ctx.lineWidth = Math.max(0.5, (link.strength || 0.5) * 2 / globalScale);
     ctx.stroke();
-  }, []);
+  }, [pathEdgeSet, pathResult]);
 
   if (!show) return null;
 
@@ -322,6 +438,13 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
             style={{ backgroundColor: 'rgba(212,175,55,0.15)', color: '#D4AF37', border: '1px solid rgba(212,175,55,0.3)' }}>
             <Plus className="w-3 h-3" />
             ADD ENTITY
+          </button>
+          {/* Analytics button — community detection, centrality, pathfinding */}
+          <button onClick={() => { setShowAnalytics(v => !v); if (showAnalytics) { setPathMode(false); clearPath(); } }}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-[8px] font-mono transition-colors ${showAnalytics ? 'bg-[#06D6A0]/20' : 'bg-white/5 hover:bg-white/10'}`}
+            style={{ color: showAnalytics ? '#06D6A0' : 'rgba(255,255,255,0.5)', border: `1px solid ${showAnalytics ? 'rgba(6,214,160,0.3)' : 'rgba(255,255,255,0.1)'}` }}>
+            <Activity className="w-3 h-3" />
+            ANALYTICS
           </button>
           {/* AI Chat button */}
           <button onClick={() => setShowChat(!showChat)}
@@ -400,6 +523,213 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
                   <Send className="w-3 h-3" />
                 </button>
               </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ANALYTICS PANEL (left sidebar) */}
+      <AnimatePresence>
+        {showAnalytics && (
+          <motion.div
+            initial={{ x: -380, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: -380, opacity: 0 }}
+            transition={{ type: 'tween', duration: 0.25 }}
+            className="absolute left-0 top-0 bottom-0 z-50 w-[340px] border-r border-white/10 bg-black/95 backdrop-blur-md flex flex-col"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <Activity className="w-3.5 h-3.5 text-[#06D6A0]" />
+                <span className="text-[10px] font-mono font-bold tracking-wider text-[#06D6A0]">GRAPH ANALYTICS</span>
+              </div>
+              <button onClick={() => { setShowAnalytics(false); setPathMode(false); clearPath(); }} className="text-white/40 hover:text-white p-1">
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto styled-scrollbar p-3 space-y-4">
+              {!analytics ? (
+                <div className="text-center py-8">
+                  <Network className="w-8 h-8 mx-auto mb-2 text-white/20" />
+                  <p className="text-[9px] font-mono text-white/30">Add entities and relationships</p>
+                  <p className="text-[8px] font-mono text-white/20 mt-1">to run community detection & centrality</p>
+                </div>
+              ) : (
+                <>
+                  {/* Summary stats */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[
+                      { label: 'NODES', value: analytics.stats.nodeCount, color: '#fff' },
+                      { label: 'EDGES', value: analytics.stats.edgeCount, color: '#fff' },
+                      { label: 'COMMUNITIES', value: analytics.community.count, color: '#06D6A0' },
+                      { label: 'MODULARITY', value: analytics.community.modularity.toFixed(3), color: '#FFD166' },
+                      { label: 'DENSITY', value: analytics.stats.density.toFixed(3), color: '#00E5FF' },
+                      { label: 'ISOLATED', value: analytics.stats.isolatedNodes.length, color: '#FF6D00' },
+                    ].map(s => (
+                      <div key={s.label} className="rounded border border-white/10 bg-white/[0.02] px-2 py-1.5">
+                        <div className="text-[7px] font-mono text-white/40">{s.label}</div>
+                        <div className="text-[13px] font-mono font-bold" style={{ color: s.color }}>{s.value}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Centrality metric selector */}
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <Zap className="w-3 h-3 text-[#FFD166]" />
+                      <span className="text-[8px] font-mono font-bold tracking-wider text-white/60">CENTRALITY · NODE SIZE</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1">
+                      {(Object.keys(CENTRALITY_LABELS) as CentralityMetric[]).map(m => (
+                        <button key={m} onClick={() => setCentralityMetric(m)}
+                          className="px-1.5 py-1 rounded text-[7px] font-mono transition-colors"
+                          style={{
+                            backgroundColor: centralityMetric === m ? 'rgba(255,209,102,0.15)' : 'rgba(255,255,255,0.03)',
+                            color: centralityMetric === m ? '#FFD166' : 'rgba(255,255,255,0.5)',
+                            border: `1px solid ${centralityMetric === m ? 'rgba(255,209,102,0.3)' : 'rgba(255,255,255,0.08)'}`,
+                          }}>
+                          {CENTRALITY_LABELS[m]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Top influencers */}
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <Crosshair className="w-3 h-3 text-[#EF476F]" />
+                      <span className="text-[8px] font-mono font-bold tracking-wider text-white/60">TOP INFLUENCERS</span>
+                    </div>
+                    <div className="space-y-1">
+                      {analytics.topInfluencers.filter(t => t.score > 0).slice(0, 6).map((t, i) => (
+                        <button key={t.id} onClick={() => handleSelectEntityById(t.id)}
+                          className="w-full flex items-center gap-2 px-1.5 py-1 rounded hover:bg-white/5 transition-colors text-left">
+                          <span className="text-[8px] font-mono text-white/30 w-3">{i + 1}</span>
+                          <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: communityColor(analytics.community.communityOf[t.id] ?? -1) }} />
+                          <span className="text-[8px] font-mono text-white/80 flex-1 truncate">{entityLabelById[t.id] || t.id}</span>
+                          <div className="w-12 h-1 rounded-full bg-white/10 overflow-hidden flex-shrink-0">
+                            <div className="h-full rounded-full" style={{ width: `${Math.round(t.score * 100)}%`, backgroundColor: '#EF476F' }} />
+                          </div>
+                        </button>
+                      ))}
+                      {analytics.topInfluencers.filter(t => t.score > 0).length === 0 && (
+                        <p className="text-[8px] font-mono text-white/20 px-1.5">No connected entities yet</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Communities */}
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <Users className="w-3 h-3 text-[#06D6A0]" />
+                      <span className="text-[8px] font-mono font-bold tracking-wider text-white/60">COMMUNITIES ({analytics.community.count})</span>
+                    </div>
+                    <div className="space-y-1">
+                      {analytics.community.communities
+                        .map((members, idx) => ({ members, idx }))
+                        .sort((a, b) => b.members.length - a.members.length)
+                        .slice(0, 8)
+                        .map(({ members, idx }) => (
+                          <div key={idx} className="flex items-center gap-2 px-1.5 py-1 rounded bg-white/[0.02]">
+                            <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: communityColor(idx) }} />
+                            <span className="text-[8px] font-mono text-white/70 flex-1">Cluster {idx + 1}</span>
+                            <span className="text-[8px] font-mono text-white/40">{members.length} {members.length === 1 ? 'node' : 'nodes'}</span>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+
+                  {/* Bridges — hidden connections */}
+                  {analytics.bridges.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-1.5 mb-1.5">
+                        <GitBranch className="w-3 h-3 text-[#B388FF]" />
+                        <span className="text-[8px] font-mono font-bold tracking-wider text-white/60">BRIDGES · HIDDEN LINKS</span>
+                      </div>
+                      <div className="space-y-1">
+                        {analytics.bridges.slice(0, 6).map((b, i) => (
+                          <button key={i} onClick={() => { setPathSource(b.source); setPathTarget(b.target); }}
+                            className="w-full flex items-center gap-1 px-1.5 py-1 rounded bg-white/[0.02] hover:bg-white/5 transition-colors text-left">
+                            <span className="text-[8px] font-mono text-white/70 truncate max-w-[90px]">{entityLabelById[b.source] || b.source}</span>
+                            <Route className="w-2.5 h-2.5 text-[#B388FF] flex-shrink-0" />
+                            <span className="text-[8px] font-mono text-white/70 truncate max-w-[90px]">{entityLabelById[b.target] || b.target}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Pathfinding */}
+                  <div className="pt-1 border-t border-white/10">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <Route className="w-3 h-3 text-[#00E5FF]" />
+                        <span className="text-[8px] font-mono font-bold tracking-wider text-white/60">PATHFINDING</span>
+                      </div>
+                      <button onClick={() => { setPathMode(v => !v); if (pathMode) clearPath(); }}
+                        className="px-1.5 py-0.5 rounded text-[7px] font-mono transition-colors"
+                        style={{
+                          backgroundColor: pathMode ? 'rgba(0,229,255,0.15)' : 'rgba(255,255,255,0.03)',
+                          color: pathMode ? '#00E5FF' : 'rgba(255,255,255,0.5)',
+                          border: `1px solid ${pathMode ? 'rgba(0,229,255,0.3)' : 'rgba(255,255,255,0.08)'}`,
+                        }}>
+                        {pathMode ? 'PICKING…' : 'PICK NODES'}
+                      </button>
+                    </div>
+                    {pathMode && (
+                      <p className="text-[7px] font-mono text-white/30 mb-1.5">
+                        Click two nodes on the graph to trace their shortest connection.
+                      </p>
+                    )}
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-1.5 text-[8px] font-mono">
+                        <span className="text-white/40 w-8">FROM</span>
+                        <span className="text-[#FFD166] truncate">{pathSource ? (entityLabelById[pathSource] || pathSource) : '—'}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[8px] font-mono">
+                        <span className="text-white/40 w-8">TO</span>
+                        <span className="text-[#FFD166] truncate">{pathTarget ? (entityLabelById[pathTarget] || pathTarget) : '—'}</span>
+                      </div>
+                    </div>
+                    {pathResult && (
+                      <div className="mt-2 rounded border px-2 py-1.5"
+                        style={{
+                          borderColor: pathResult.reachable ? 'rgba(0,229,255,0.3)' : 'rgba(255,109,0,0.3)',
+                          backgroundColor: pathResult.reachable ? 'rgba(0,229,255,0.05)' : 'rgba(255,109,0,0.05)',
+                        }}>
+                        {pathResult.reachable ? (
+                          <>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-[8px] font-mono text-[#00E5FF] font-bold">{pathResult.hops} HOP{pathResult.hops === 1 ? '' : 'S'}</span>
+                              <span className="text-[7px] font-mono text-white/40">cost {pathResult.cost.toFixed(2)}</span>
+                            </div>
+                            <div className="flex items-center flex-wrap gap-x-1 gap-y-0.5">
+                              {pathResult.path.map((id, i) => (
+                                <span key={id} className="flex items-center gap-1">
+                                  <button onClick={() => handleSelectEntityById(id)}
+                                    className="text-[7px] font-mono text-white/80 hover:text-[#00E5FF] truncate max-w-[80px]">
+                                    {entityLabelById[id] || id}
+                                  </button>
+                                  {i < pathResult.path.length - 1 && <span className="text-white/30 text-[7px]">→</span>}
+                                </span>
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-[8px] font-mono text-[#FF6D00]">No path — entities are not connected.</span>
+                        )}
+                      </div>
+                    )}
+                    {(pathSource || pathTarget) && (
+                      <button onClick={clearPath} className="mt-1.5 text-[7px] font-mono text-white/40 hover:text-white">
+                        CLEAR PATH
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           </motion.div>
         )}

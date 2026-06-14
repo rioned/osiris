@@ -142,6 +142,16 @@ The graph has **two modes**, toggled in the panel header:
 
 Each analyst's Personal Graph is **isolated per user** (namespaced by account), so investigations don't bleed across logins on a shared browser.
 
+#### Advanced Graph Analytics
+An **ANALYTICS** toggle in the panel header layers a full graph-theory suite over the force view — all computed client-side with **zero external dependencies** (`src/lib/graph-analytics.ts`), and also exposed server-side at `/api/ontology/analytics`:
+
+- **Community detection** — the **Louvain** method (greedy modularity maximisation with multi-level aggregation, plus a Leiden-style connectivity guard) partitions entities into clusters. Nodes are recoloured by community and a **modularity** score quantifies how strongly the structure separates.
+- **Centrality scoring** — **degree**, **betweenness** (Brandes), **closeness**, and **eigenvector** centrality, each normalised 0–1. The selected metric drives node radius so the most influential entities visibly dominate, and a **Top Influencers** list ranks them by a blended score.
+- **Pathfinding** — pick any two entities to trace the **shortest path** between them (Dijkstra weighted by `1/strength`, so high-confidence relationships are preferred); the route is highlighted on the canvas with hop count and cost.
+- **Hidden connections** — inter-community **bridge** edges are surfaced as candidate hidden links; one click traces the path between the bridged entities.
+
+The analytics operate on the existing entity/relationship store, so they require no new data and work identically on the in-browser personal graph and the durable server ontology.
+
 ### 3. AI Chat Panel
 Side panel for querying ontology data using natural language. Streaming responses from DeepSeek with full conversation history and context from stored entities.
 
@@ -420,25 +430,23 @@ docker builder prune -af
 
 3. **Threat scoring engine** — ML-based scoring that weighs entity proximity, temporal recency, severity distribution, and cross-source correlation into a single threat score per entity/region.
 
-4. **Advanced graph analytics** — Community detection (Louvain/Leiden), centrality scoring, pathfinding between entities in the ontology graph — identify hidden connections.
+4. **Natural language search** — Full-text + semantic search across all intelligence layers, ontology entities, and ingested data — "show me all flights near this phone number's location in the last 24 hours".
 
-5. **Natural language search** — Full-text + semantic search across all intelligence layers, ontology entities, and ingested data — "show me all flights near this phone number's location in the last 24 hours".
+5. **Automated OSINT playbooks** — Triggerable sequences of RECON toolkit operations with conditional branching — e.g., "when a new phone number is ingested, run OSINT sweep on it, cross-check against sanctions, and create an Intel Pin".
 
-6. **Automated OSINT playbooks** — Triggerable sequences of RECON toolkit operations with conditional branching — e.g., "when a new phone number is ingested, run OSINT sweep on it, cross-check against sanctions, and create an Intel Pin".
+6. **Historical timeline playback** — Record and replay entity movements (flights, vessels) with a scrubable timeline — reconstruct past events from cached geospatial data.
 
-7. **Historical timeline playback** — Record and replay entity movements (flights, vessels) with a scrubable timeline — reconstruct past events from cached geospatial data.
+7. **Dark web monitoring integration** — Tor/onion scanner module for surface-level dark web OSINT, with automatic entity extraction and linkage to the ontology graph.
 
-8. **Dark web monitoring integration** — Tor/onion scanner module for surface-level dark web OSINT, with automatic entity extraction and linkage to the ontology graph.
+8. **Geofence alerts** — Define geographic boundaries that trigger alerts when aircraft, vessels, or tracked entities enter/exit — with notification delivery via Telegram, email, or webhook.
 
-9. **Geofence alerts** — Define geographic boundaries that trigger alerts when aircraft, vessels, or tracked entities enter/exit — with notification delivery via Telegram, email, or webhook.
+9. **Federated OSINT sharing** — Peer-to-peer sharing of anonymized intelligence between OSIRIS instances with cryptographic attestation and reputation scoring.
 
-10. **Federated OSINT sharing** — Peer-to-peer sharing of anonymized intelligence between OSIRIS instances with cryptographic attestation and reputation scoring.
+10. **Mobile companion app** — React Native or PWA frontend for field operations — camera-based document scanning, GPS tagging, push alerts.
 
-11. **Mobile companion app** — React Native or PWA frontend for field operations — camera-based document scanning, GPS tagging, push alerts.
+11. **SOC/IDS integration** — Connect to SIEM platforms (Splunk, Elastic) or IDS (Suricata, Zeek) to overlay network security events on the geospatial dashboard — map IP-based threats to physical locations.
 
-12. **SOC/IDS integration** — Connect to SIEM platforms (Splunk, Elastic) or IDS (Suricata, Zeek) to overlay network security events on the geospatial dashboard — map IP-based threats to physical locations.
-
-13. **LLM fine-tuning** — Train a domain-specific model on OSINT report corpora for improved entity extraction, relationship inference, and false-positive reduction in the ontology engine.
+12. **LLM fine-tuning** — Train a domain-specific model on OSINT report corpora for improved entity extraction, relationship inference, and false-positive reduction in the ontology engine.
 
 ---
 
