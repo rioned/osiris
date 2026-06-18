@@ -130,6 +130,10 @@ export interface PersonalStore {
   entities: PersonalEntity[];
   relationships: PersonalRelationship[];
   version: number;
+  // Persisted "not the same person" decisions from the cross-platform identity
+  // resolution review queue (see lib/identity-resolution.ts). Optional + ignored
+  // by everything else, so older saves remain fully compatible.
+  identityDecisions?: { pairKey: string; decision: 'rejected'; at: string }[];
 }
 
 /**

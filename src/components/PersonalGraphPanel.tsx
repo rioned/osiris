@@ -9,7 +9,7 @@ import {
   Wifi, Globe, Calendar, Image, Search, Plus,
   Network, Eye, EyeOff, Crosshair, RefreshCw, Layers,
   MessageCircle, Send, Bot, Share2, GitBranch,
-  Activity, Users, Route, Zap
+  Activity, Users, Route, Zap, ScanFace
 } from 'lucide-react';
 import {
   PersonalEntity, PersonalEntityType, PersonalGraphData,
@@ -23,6 +23,11 @@ import {
   analyzeGraph, findShortestPath, communityColor,
   type GraphAnalyticsResult, type PathResult,
 } from '@/lib/graph-analytics';
+import {
+  mergeIdentities, splitIdentity, rejectIdentityCandidate,
+  type IdentityCandidate,
+} from '@/lib/identity-resolution';
+import IdentityResolutionPanel from './IdentityResolutionPanel';
 import { useAuth } from './AuthProvider';
 
 type CentralityMetric = 'degree' | 'betweenness' | 'closeness' | 'eigenvector';
@@ -68,6 +73,11 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
   const [viewMode, setViewMode] = useState<GraphViewMode>('force');
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Cross-platform identity resolution review queue (merge/split) — opens a
+  // right-hand sidebar; all mutation routes through the pure helpers in
+  // lib/identity-resolution.ts, leaving the existing store flow untouched.
+  const [showIdentity, setShowIdentity] = useState(false);
 
   // AI Chat state
   const [showChat, setShowChat] = useState(false);
@@ -280,6 +290,31 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
     const node = graphData.nodes.find(n => n.id === id);
     if (node) setSelectedNode(node);
   }, [graphData.nodes]);
+
+  // ── Identity resolution handlers (shared store) ──
+  // Fold one node into another, suppress a non-match, or split a prior merge.
+  // Each delegates to a pure helper, then persists + rebuilds like every other
+  // store mutation in this panel.
+  const handleMergeIdentity = useCallback((primaryId: string, secondaryId: string, candidate: IdentityCandidate) => {
+    const updated = mergeIdentities(store, primaryId, secondaryId, candidate);
+    setStore(updated);
+    savePersonalStore(updated, uid);
+    rebuildGraph(updated);
+    setSelectedNode(null);
+  }, [store, rebuildGraph]);
+
+  const handleRejectIdentity = useCallback((candidate: IdentityCandidate) => {
+    const updated = rejectIdentityCandidate(store, candidate);
+    setStore(updated);
+    savePersonalStore(updated, uid);
+  }, [store]);
+
+  const handleSplitIdentity = useCallback((primaryId: string, recordId: string) => {
+    const updated = splitIdentity(store, primaryId, recordId);
+    setStore(updated);
+    savePersonalStore(updated, uid);
+    rebuildGraph(updated);
+  }, [store, rebuildGraph]);
 
   // Search filter
   const filteredNodes = searchQuery
@@ -497,6 +532,13 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
             <Activity className="w-3 h-3" />
             ANALYTICS
           </button>
+          {/* Identity resolution button — cross-platform merge/split review queue */}
+          <button onClick={() => setShowIdentity(v => !v)}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-[8px] font-mono transition-colors ${showIdentity ? 'bg-[#4DA3FF]/20' : 'bg-white/5 hover:bg-white/10'}`}
+            style={{ color: showIdentity ? '#4DA3FF' : 'rgba(255,255,255,0.5)', border: `1px solid ${showIdentity ? 'rgba(77,163,255,0.3)' : 'rgba(255,255,255,0.1)'}` }}>
+            <ScanFace className="w-3 h-3" />
+            IDENTITY
+          </button>
           {/* AI Chat button */}
           <button onClick={() => setShowChat(!showChat)}
             className={`flex items-center gap-1 px-2 py-1 rounded text-[8px] font-mono transition-colors ${showChat ? 'bg-[#B388FF]/20' : 'bg-white/5 hover:bg-white/10'}`}
@@ -576,6 +618,20 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
               </div>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* IDENTITY RESOLUTION PANEL (right sidebar) */}
+      <AnimatePresence>
+        {showIdentity && (
+          <IdentityResolutionPanel
+            store={store}
+            onMerge={handleMergeIdentity}
+            onReject={handleRejectIdentity}
+            onSplit={handleSplitIdentity}
+            onSelectEntity={handleSelectEntityById}
+            onClose={() => setShowIdentity(false)}
+          />
         )}
       </AnimatePresence>
 
