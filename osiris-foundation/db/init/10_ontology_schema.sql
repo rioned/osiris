@@ -101,7 +101,7 @@ CREATE TABLE ontology.audit_log (
     actor       TEXT NOT NULL,              -- user / agent id
     action      TEXT NOT NULL,             -- read | create | update | merge | link | flag | export
     object_type TEXT,
-    object_id   UUID,
+    object_id   TEXT,                          -- TEXT: app entity ids aren't all UUIDs
     detail      JSONB NOT NULL DEFAULT '{}',
     at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );

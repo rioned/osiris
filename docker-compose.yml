@@ -74,6 +74,9 @@ services:
       - POSTGRES_DB=osiris
     volumes:
       - osiris-pgdata:/var/lib/postgresql/data
+      # Foundation schema: extensions (pgvector/AGE/pg_trgm), ontology tables,
+      # graph + indexes. Runs once on a fresh data volume.
+      - ./osiris-foundation/db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U osiris"]
       interval: 10s
@@ -117,7 +120,3 @@ volumes:
   osiris-pgdata:
   osiris-minio-data:
   osiris-redis-data:
-
-networks:
-  umami_default:
-    external: true

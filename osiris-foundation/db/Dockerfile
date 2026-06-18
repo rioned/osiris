@@ -10,8 +10,10 @@ ARG AGE_BRANCH=release/PG16/1.5.0
 USER root
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
         git build-essential flex bison \
         postgresql-server-dev-16 \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 --branch ${AGE_BRANCH} https://github.com/apache/age.git /tmp/age \

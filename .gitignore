@@ -44,3 +44,6 @@ scanner_backend_backup.js
 # Security - Prevent accidental manual leaks
 *Manual*.md
 
+# Runtime state - local user accounts, plugin data (contains credential hashes)
+/data/
+

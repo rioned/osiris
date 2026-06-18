@@ -88,11 +88,62 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
   const [pathTarget, setPathTarget] = useState<string | null>(null);
 
   // Load store on mount (and when the active user changes — workspace isolation)
+  // Tries server API first for shared/durable data, falls back to localStorage.
   useEffect(() => {
     if (!show) return;
-    const loaded = loadPersonalStore(uid);
-    setStore(loaded);
-    rebuildGraph(loaded);
+
+    // 1. Load from localStorage as immediate fallback / cache
+    const localStore = loadPersonalStore(uid);
+
+    // 2. Fetch from the server-side shared ontology API
+    fetch('/api/ontology/entities?graph=true')
+      .then(res => res.ok ? res.json() : null)
+      .then(serverData => {
+        if (serverData && Array.isArray(serverData.entities) && serverData.entities.length > 0) {
+          // Map server entities to PersonalEntity format
+          const serverEntities = serverData.entities.map((e: any) => ({
+            id: e.id,
+            type: e.type,
+            domain: e.domain,
+            label: e.label,
+            description: e.description || '',
+            coordinates: e.coordinates || undefined,
+            properties: e.properties || {},
+            tags: e.tags || [],
+            source: e.source || 'api',
+            linkedEntityIds: e.linkedEntityIds || [],
+            createdAt: e.createdAt || e.created_at || new Date().toISOString(),
+            updatedAt: e.updatedAt || e.updated_at || new Date().toISOString(),
+          }));
+          const serverRels = (serverData.relationships || []).map((r: any) => ({
+            id: r.id,
+            sourceId: r.sourceId || r.source_id,
+            targetId: r.targetId || r.target_id,
+            label: r.label,
+            strength: r.strength ?? 0.8,
+            metadata: r.metadata || {},
+            createdAt: r.createdAt || r.created_at || new Date().toISOString(),
+          }));
+
+          const merged: PersonalStore = {
+            entities: serverEntities,
+            relationships: serverRels,
+            version: (localStore.version || 0) + 1,
+          };
+          setStore(merged);
+          savePersonalStore(merged, uid);
+          rebuildGraph(merged);
+        } else {
+          // Server empty — use localStorage fallback
+          setStore(localStore);
+          rebuildGraph(localStore);
+        }
+      })
+      .catch(() => {
+        // Network error — fall back to localStorage
+        setStore(localStore);
+        rebuildGraph(localStore);
+      });
   }, [show, uid]);
 
   const rebuildGraph = useCallback((s: PersonalStore) => {
