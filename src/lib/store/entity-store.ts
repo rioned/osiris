@@ -13,6 +13,7 @@
  */
 
 import { query, isDBAvailable, graphQuery, initDB } from './db';
+import { loadOntologyRegistry } from './ontology-loader';
 import { PersonalEntity, PersonalRelationship, PersonalDomain } from '../personal-ontology';
 
 // ── In-Memory Fallback ──
@@ -78,7 +79,53 @@ export async function ensureStore(): Promise<void> {
   await query('CREATE INDEX IF NOT EXISTS idx_ontology_rel_source ON ontology_relationships(source_id)');
   await query('CREATE INDEX IF NOT EXISTS idx_ontology_rel_target ON ontology_relationships(target_id)');
 
+  // Governance: immutable audit log (matches osiris-foundation/db/init/10_ontology_schema.sql).
+  // Append-only — every entity/relationship write records who did what, when.
+  await query(`
+    CREATE SCHEMA IF NOT EXISTS ontology;
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS ontology.audit_log (
+      id          BIGSERIAL PRIMARY KEY,
+      actor       TEXT NOT NULL,
+      action      TEXT NOT NULL,
+      object_type TEXT,
+      object_id   TEXT,
+      detail      JSONB NOT NULL DEFAULT '{}',
+      at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await query('CREATE INDEX IF NOT EXISTS ix_audit_object ON ontology.audit_log(object_type, object_id)');
+
+  // Sync the declarative ontology type registry (object/link types) from
+  // osiris-foundation/ontology/*.yaml into ontology.object_types / link_types.
+  await loadOntologyRegistry();
+
   console.log('[OntologyStore] DB tables ready');
+}
+
+/**
+ * Append an immutable audit entry. Governance per the foundation roadmap:
+ * every write to the ontology is recorded and never updated or deleted.
+ * Best-effort — a logging failure must never break the underlying operation.
+ */
+async function writeAudit(
+  action: string,
+  objectType: string | null,
+  objectId: string | null,
+  detail: Record<string, any> = {},
+  actor = 'system'
+): Promise<void> {
+  if (!isDBAvailable()) return;
+  try {
+    await query(
+      `INSERT INTO ontology.audit_log (actor, action, object_type, object_id, detail)
+       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      [actor, action, objectType, objectId, JSON.stringify(detail)]
+    );
+  } catch {
+    /* audit is best-effort — never throw */
+  }
 }
 
 // ── Entity CRUD ──
@@ -221,6 +268,8 @@ export async function upsertEntity(entity: Partial<PersonalEntity> & { id: strin
     ]
   );
 
+  await writeAudit('upsert', fullEntity.type, fullEntity.id, { label: fullEntity.label, domain: fullEntity.domain }, fullEntity.source || 'system');
+
   return fullEntity;
 }
 
@@ -239,7 +288,9 @@ export async function deleteEntity(id: string): Promise<boolean> {
 
   // CASCADE handles relationships
   const result = await query('DELETE FROM ontology_entities WHERE id = $1', [id]);
-  return (result?.rowCount || 0) > 0;
+  const deleted = (result?.rowCount || 0) > 0;
+  if (deleted) await writeAudit('delete', null, id);
+  return deleted;
 }
 
 // ── Relationship CRUD ──
@@ -327,6 +378,8 @@ export async function createRelationship(rel: {
     [id, rel.sourceId, rel.targetId, rel.label, rel.strength ?? 0.8, JSON.stringify(rel.metadata || {}), now]
   );
 
+  await writeAudit('link', 'relationship', id, { sourceId: rel.sourceId, targetId: rel.targetId, label: rel.label });
+
   return relationship;
 }
 
@@ -343,7 +396,149 @@ export async function deleteRelationship(id: string): Promise<boolean> {
   }
 
   const result = await query('DELETE FROM ontology_relationships WHERE id = $1', [id]);
-  return (result?.rowCount || 0) > 0;
+  const deleted = (result?.rowCount || 0) > 0;
+  if (deleted) await writeAudit('unlink', 'relationship', id);
+  return deleted;
+}
+
+// ── Backup / Restore ──
+
+/** A full, unbounded snapshot of the ontology data (entities + relationships). */
+export interface OntologySnapshot {
+  entities: PersonalEntity[];
+  relationships: PersonalRelationship[];
+}
+
+/**
+ * Export EVERY entity and relationship in the store (no row limit) for a
+ * full logical backup. Works in both Postgres and in-memory modes.
+ * Unlike getGraph(), this is not capped — it is meant for backups.
+ */
+export async function exportSnapshot(): Promise<OntologySnapshot> {
+  await ensureStore();
+
+  if (!isDBAvailable()) {
+    return {
+      entities: memStore.entities.map(e => ({ ...e })),
+      relationships: memStore.relationships.map(r => ({ ...r })),
+    };
+  }
+
+  const [ents, rels] = await Promise.all([
+    query('SELECT * FROM ontology_entities ORDER BY created_at ASC'),
+    query('SELECT * FROM ontology_relationships ORDER BY created_at ASC'),
+  ]);
+
+  return {
+    entities: (ents?.rows || []).map(rowToEntity),
+    relationships: (rels?.rows || []).map(rowToRelationship),
+  };
+}
+
+/** Quick counts for the backup UI — avoids serialising the whole store. */
+export async function getStoreCounts(): Promise<{ entities: number; relationships: number; source: 'postgres' | 'memory' }> {
+  await ensureStore();
+
+  if (!isDBAvailable()) {
+    return { entities: memStore.entities.length, relationships: memStore.relationships.length, source: 'memory' };
+  }
+
+  const [e, r] = await Promise.all([
+    query('SELECT COUNT(*)::int AS c FROM ontology_entities'),
+    query('SELECT COUNT(*)::int AS c FROM ontology_relationships'),
+  ]);
+  return { entities: e?.rows?.[0]?.c || 0, relationships: r?.rows?.[0]?.c || 0, source: 'postgres' };
+}
+
+/**
+ * Restore a snapshot of entities + relationships.
+ *  - 'replace' wipes ALL existing entities first (relationships cascade away),
+ *    giving an exact restore of the backup.
+ *  - 'merge' upserts the backup on top of existing data, preserving ids.
+ * Relationships whose endpoints are missing are skipped rather than aborting
+ * the whole restore. Returns how many rows were written / skipped.
+ */
+export async function restoreSnapshot(
+  snapshot: OntologySnapshot,
+  mode: 'merge' | 'replace' = 'merge',
+  actor = 'admin'
+): Promise<{ entities: number; relationships: number; skipped: number }> {
+  await ensureStore();
+
+  const entities = Array.isArray(snapshot?.entities) ? snapshot.entities : [];
+  const relationships = Array.isArray(snapshot?.relationships) ? snapshot.relationships : [];
+
+  // ── In-memory mode ──
+  if (!isDBAvailable()) {
+    if (mode === 'replace') memStore = { entities: [], relationships: [] };
+
+    const byId = new Map(memStore.entities.map(e => [e.id, e]));
+    for (const e of entities) {
+      if (!e?.id || !e?.type || !e?.label) continue;
+      byId.set(e.id, { ...e, domain: e.domain || (mapDomainToPersonalDomain(e.type) as PersonalDomain) });
+    }
+    memStore.entities = [...byId.values()];
+
+    const validIds = new Set(memStore.entities.map(e => e.id));
+    const relById = new Map(memStore.relationships.map(r => [r.id, r]));
+    let skipped = 0;
+    for (const r of relationships) {
+      if (!r?.id || !validIds.has(r.sourceId) || !validIds.has(r.targetId)) { skipped++; continue; }
+      relById.set(r.id, { ...r });
+    }
+    memStore.relationships = [...relById.values()];
+    return { entities: memStore.entities.length, relationships: relationships.length - skipped, skipped };
+  }
+
+  // ── Postgres mode ──
+  if (mode === 'replace') {
+    await query('DELETE FROM ontology_entities'); // CASCADE clears relationships too
+  }
+
+  let entCount = 0;
+  for (const e of entities) {
+    if (!e?.id || !e?.type || !e?.label) continue;
+    const domain = e.domain || mapDomainToPersonalDomain(e.type);
+    const res = await query(
+      `INSERT INTO ontology_entities (id, type, domain, label, description, coordinates, properties, tags, source, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::text[],$9,$10,$11)
+       ON CONFLICT (id) DO UPDATE SET
+         type=EXCLUDED.type, domain=EXCLUDED.domain, label=EXCLUDED.label,
+         description=EXCLUDED.description, coordinates=EXCLUDED.coordinates,
+         properties=EXCLUDED.properties, tags=EXCLUDED.tags, source=EXCLUDED.source,
+         updated_at=EXCLUDED.updated_at`,
+      [
+        e.id, e.type, domain, e.label, e.description || '',
+        e.coordinates ? JSON.stringify(e.coordinates) : null,
+        JSON.stringify(e.properties || {}),
+        e.tags || [],
+        e.source || 'restore',
+        e.createdAt || new Date().toISOString(),
+        e.updatedAt || new Date().toISOString(),
+      ]
+    );
+    if (res) entCount++;
+  }
+
+  // Insert relationships after entities so FK targets exist. A failed row
+  // (e.g. missing endpoint) returns null from query() and is counted skipped.
+  let relCount = 0, skipped = 0;
+  for (const r of relationships) {
+    if (!r?.id || !r?.sourceId || !r?.targetId || !r?.label) { skipped++; continue; }
+    const res = await query(
+      `INSERT INTO ontology_relationships (id, source_id, target_id, label, strength, metadata, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
+       ON CONFLICT (id) DO UPDATE SET
+         source_id=EXCLUDED.source_id, target_id=EXCLUDED.target_id,
+         label=EXCLUDED.label, strength=EXCLUDED.strength, metadata=EXCLUDED.metadata`,
+      [r.id, r.sourceId, r.targetId, r.label, r.strength ?? 0.5, JSON.stringify(r.metadata || {}), r.createdAt || new Date().toISOString()]
+    );
+    if (res) relCount++; else skipped++;
+  }
+
+  await writeAudit('restore', null, null, { mode, entities: entCount, relationships: relCount, skipped }, actor);
+
+  return { entities: entCount, relationships: relCount, skipped };
 }
 
 // ── Graph Query ──

@@ -23,18 +23,19 @@ import {
   X, Shield, Users, Network, Plus, RefreshCw, Loader2, Zap, Radio,
   Database, Upload, Search, Globe, MessageSquare, Share2, UserCheck,
   Link, FileText, ChevronDown, ChevronRight, CheckCircle2, AlertCircle,
-  Clock, Eye, EyeOff, Download, Trash2, Copy, Twitter, Video, BookOpen,
-  Briefcase, Phone, Bot,
+  Clock, Eye, EyeOff, Download, Trash2, Copy, Bird as Twitter, Video, BookOpen,
+  Briefcase, Phone, Bot, HardDriveDownload, RotateCcw, FileJson, AlertTriangle,
 } from 'lucide-react';
 import { useAuth, type UserRole } from './AuthProvider';
 import {
   PersonalEntity, PersonalRelationship, PersonalEntityType,
   PERSONAL_TYPE_COLORS, PERSONAL_TYPE_LABELS, generateEntityId,
 } from '@/lib/personal-ontology';
+import { useOntologyTypes } from '@/lib/useOntologyTypes';
 
 const LinkEditorGraph = dynamic(() => import('./LinkEditorGraph'), { ssr: false });
 
-type AdminTab = 'users' | 'ontology' | 'connectors';
+type AdminTab = 'users' | 'ontology' | 'connectors' | 'backup';
 type ConnectorTab = 'twitter' | 'youtube' | 'facebook' | 'linkedin' | 'whatsapp' | 'bulk-import';
 type BulkImportType = 'person-ids' | 'phone-contacts' | 'persons-and-jobs';
 
@@ -167,6 +168,14 @@ export default function AdminPanel({ show, onClose }: Props) {
               }}>
               <Database className="w-3 h-3" /> CONNECTORS
             </button>
+            <button onClick={() => setTab('backup')}
+              className="flex items-center gap-1 px-3 py-1.5 text-[8px] font-mono transition-colors"
+              style={{
+                backgroundColor: tab === 'backup' ? 'rgba(59,167,118,0.15)' : 'rgba(255,255,255,0.03)',
+                color: tab === 'backup' ? '#3BA776' : 'rgba(255,255,255,0.5)',
+              }}>
+              <HardDriveDownload className="w-3 h-3" /> BACKUP &amp; RESTORE
+            </button>
           </div>
           <button onClick={onClose} className="p-1 hover:bg-[#FF1744]/20 rounded transition-colors">
             <X className="w-4 h-4 text-[#FF1744]" />
@@ -178,6 +187,7 @@ export default function AdminPanel({ show, onClose }: Props) {
         {tab === 'users' && <UsersTab token={token} />}
         {tab === 'ontology' && <OntologyTab token={token} />}
         {tab === 'connectors' && <ConnectorsTab token={token} />}
+        {tab === 'backup' && <BackupTab token={token} />}
       </div>
     </motion.div>
   );
@@ -277,6 +287,239 @@ function UsersTab({ token }: { token: string | null }) {
 }
 
 // ════════════════════════════════════════════════════════════════
+//  BACKUP & RESTORE TAB
+//  Download a full JSON backup of the ontology data (entities +
+//  relationships) and restore it again — merge on top, or replace
+//  everything. Backed by /api/admin/backup (admin only).
+// ════════════════════════════════════════════════════════════════
+
+interface BackupMeta { entities: number; relationships: number; source: 'postgres' | 'memory'; }
+interface PendingRestore { fileName: string; backup: any; entities: number; relationships: number; createdAt?: string; }
+
+function BackupTab({ token }: { token: string | null }) {
+  const [meta, setMeta] = useState<BackupMeta | null>(null);
+  const [loadingMeta, setLoadingMeta] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [mode, setMode] = useState<'merge' | 'replace'>('merge');
+  const [pending, setPending] = useState<PendingRestore | null>(null);
+  const [confirmReplace, setConfirmReplace] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const loadMeta = useCallback(async () => {
+    if (!token) return;
+    setLoadingMeta(true); setError(null);
+    try {
+      const res = await fetch('/api/admin/backup?meta=1', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (res.ok) setMeta(data);
+      else setError(data.error || 'Failed to load store stats');
+    } catch { setError('Network error'); }
+    finally { setLoadingMeta(false); }
+  }, [token]);
+
+  useEffect(() => { loadMeta(); }, [loadMeta]);
+
+  const downloadBackup = useCallback(async () => {
+    if (!token) return;
+    setDownloading(true); setError(null); setNotice(null);
+    try {
+      const res = await fetch('/api/admin/backup', { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || `Backup failed (${res.status})`);
+        return;
+      }
+      const text = await res.text();
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      a.href = url; a.download = `osiris-backup-${stamp}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      let count = 0;
+      try { count = (JSON.parse(text)?.data?.entities || []).length; } catch { /* ignore */ }
+      setNotice(`Backup downloaded · ${count} entities`);
+    } catch { setError('Network error during backup'); }
+    finally { setDownloading(false); }
+  }, [token]);
+
+  const onPickFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null); setNotice(null); setConfirmReplace(false);
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const backup = JSON.parse(text);
+      if (backup?.magic !== 'osiris-ontology-backup') {
+        setError('Not an OSIRIS backup file');
+        setPending(null);
+        return;
+      }
+      setPending({
+        fileName: file.name,
+        backup,
+        entities: backup?.data?.entities?.length || 0,
+        relationships: backup?.data?.relationships?.length || 0,
+        createdAt: backup?.createdAt,
+      });
+    } catch {
+      setError('Could not read or parse the selected file');
+      setPending(null);
+    } finally {
+      // allow re-selecting the same file
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  }, []);
+
+  const runRestore = useCallback(async () => {
+    if (!token || !pending) return;
+    if (mode === 'replace' && !confirmReplace) { setConfirmReplace(true); return; }
+    setRestoring(true); setError(null); setNotice(null);
+    try {
+      const res = await fetch('/api/admin/backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ backup: pending.backup, mode }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setNotice(`Restore complete (${data.mode}) · ${data.entities} entities, ${data.relationships} relationships${data.skipped ? `, ${data.skipped} skipped` : ''}`);
+        setPending(null); setConfirmReplace(false);
+        await loadMeta();
+      } else {
+        setError(data.error || 'Restore failed');
+      }
+    } catch { setError('Network error during restore'); }
+    finally { setRestoring(false); }
+  }, [token, pending, mode, confirmReplace, loadMeta]);
+
+  return (
+    <div className="h-full overflow-y-auto styled-scrollbar p-4 max-w-3xl">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-mono font-bold text-white/80 tracking-wider">BACKUP &amp; RESTORE</span>
+          {meta && (
+            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded"
+              style={{ color: meta.source === 'postgres' ? '#3BA776' : '#F2A65A', background: meta.source === 'postgres' ? 'rgba(59,167,118,0.12)' : 'rgba(242,166,90,0.12)' }}>
+              {meta.source === 'postgres' ? 'POSTGRES' : 'IN-MEMORY'}
+            </span>
+          )}
+        </div>
+        <button onClick={loadMeta} className="flex items-center gap-1 px-2 py-1 rounded text-[8px] font-mono text-white/60 hover:text-white bg-white/5 hover:bg-white/10 transition-colors">
+          <RefreshCw className={`w-3 h-3 ${loadingMeta ? 'animate-spin' : ''}`} /> REFRESH
+        </button>
+      </div>
+
+      {error && <div className="mb-2 px-3 py-1.5 rounded bg-[#FF1744]/15 border border-[#FF1744]/30 flex items-center gap-2"><AlertCircle className="w-3 h-3 text-[#FF1744]" /><span className="text-[8px] font-mono text-[#FF1744]">{error}</span></div>}
+      {notice && <div className="mb-2 px-3 py-1.5 rounded bg-[#3BA776]/15 border border-[#3BA776]/30 flex items-center gap-2"><CheckCircle2 className="w-3 h-3 text-[#3BA776]" /><span className="text-[8px] font-mono text-[#3BA776]">{notice}</span></div>}
+
+      {/* Current data */}
+      <div className="grid grid-cols-2 gap-2 mb-4">
+        <div className="rounded border border-white/10 bg-white/[0.02] p-3">
+          <div className="text-[8px] font-mono text-white/40 uppercase tracking-wider mb-1">Entities</div>
+          <div className="text-[18px] font-mono font-bold text-white/90">{meta ? meta.entities : '—'}</div>
+        </div>
+        <div className="rounded border border-white/10 bg-white/[0.02] p-3">
+          <div className="text-[8px] font-mono text-white/40 uppercase tracking-wider mb-1">Relationships</div>
+          <div className="text-[18px] font-mono font-bold text-white/90">{meta ? meta.relationships : '—'}</div>
+        </div>
+      </div>
+
+      {/* Backup */}
+      <div className="rounded border border-white/10 bg-white/[0.02] p-4 mb-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Download className="w-3.5 h-3.5 text-[#3BA776]" />
+          <span className="text-[10px] font-mono font-bold text-white/80 tracking-wider">CREATE BACKUP</span>
+        </div>
+        <p className="text-[8px] font-mono text-white/40 leading-relaxed mb-3">
+          Downloads a single JSON file with every entity and relationship in your store, checksum-protected. Keep it safe — it restores your full graph.
+        </p>
+        <button onClick={downloadBackup} disabled={downloading}
+          className="flex items-center gap-2 px-3 py-1.5 rounded text-[9px] font-mono font-bold transition-colors disabled:opacity-50"
+          style={{ background: 'rgba(59,167,118,0.15)', color: '#3BA776', border: '1px solid rgba(59,167,118,0.4)' }}>
+          {downloading ? <Loader2 className="w-3 h-3 animate-spin" /> : <HardDriveDownload className="w-3 h-3" />}
+          {downloading ? 'BUILDING BACKUP…' : 'DOWNLOAD BACKUP'}
+        </button>
+      </div>
+
+      {/* Restore */}
+      <div className="rounded border border-white/10 bg-white/[0.02] p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Upload className="w-3.5 h-3.5 text-[#00E5FF]" />
+          <span className="text-[10px] font-mono font-bold text-white/80 tracking-wider">RESTORE FROM BACKUP</span>
+        </div>
+        <p className="text-[8px] font-mono text-white/40 leading-relaxed mb-3">
+          Load a backup file, then choose how to apply it. <span className="text-white/60">Merge</span> adds/updates on top of current data; <span className="text-[#FF8A65]">Replace</span> wipes everything first.
+        </p>
+
+        <input ref={fileRef} type="file" accept=".json,application/json" onChange={onPickFile} className="hidden" />
+        <button onClick={() => fileRef.current?.click()}
+          className="flex items-center gap-2 px-3 py-1.5 rounded text-[9px] font-mono text-white/70 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-colors mb-3">
+          <FileJson className="w-3 h-3" /> CHOOSE BACKUP FILE…
+        </button>
+
+        {pending && (
+          <div className="rounded border border-white/10 bg-black/30 p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <FileJson className="w-3 h-3 text-[#00E5FF]" />
+              <span className="text-[9px] font-mono text-white/80 truncate">{pending.fileName}</span>
+            </div>
+            <div className="text-[8px] font-mono text-white/40 mb-3">
+              {pending.entities} entities · {pending.relationships} relationships
+              {pending.createdAt && <> · {new Date(pending.createdAt).toLocaleString()}</>}
+            </div>
+
+            <div className="flex items-center gap-1 mb-3">
+              {(['merge', 'replace'] as const).map(m => (
+                <button key={m} onClick={() => { setMode(m); setConfirmReplace(false); }}
+                  className="px-2.5 py-1 rounded text-[8px] font-mono transition-colors"
+                  style={{
+                    background: mode === m ? (m === 'replace' ? 'rgba(255,138,101,0.15)' : 'rgba(0,229,255,0.15)') : 'rgba(255,255,255,0.03)',
+                    color: mode === m ? (m === 'replace' ? '#FF8A65' : '#00E5FF') : 'rgba(255,255,255,0.5)',
+                    border: `1px solid ${mode === m ? (m === 'replace' ? 'rgba(255,138,101,0.4)' : 'rgba(0,229,255,0.4)') : 'rgba(255,255,255,0.1)'}`,
+                  }}>
+                  {m.toUpperCase()}
+                </button>
+              ))}
+            </div>
+
+            {mode === 'replace' && confirmReplace && (
+              <div className="mb-3 px-3 py-2 rounded bg-[#FF1744]/10 border border-[#FF1744]/30 flex items-start gap-2">
+                <AlertTriangle className="w-3 h-3 text-[#FF1744] mt-0.5 shrink-0" />
+                <span className="text-[8px] font-mono text-[#FF8A65] leading-relaxed">
+                  This will permanently delete all {meta?.entities ?? 'existing'} entities and their relationships, then load the backup. Click RESTORE again to confirm.
+                </span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button onClick={runRestore} disabled={restoring}
+                className="flex items-center gap-2 px-3 py-1.5 rounded text-[9px] font-mono font-bold transition-colors disabled:opacity-50"
+                style={
+                  mode === 'replace' && confirmReplace
+                    ? { background: 'rgba(255,23,68,0.2)', color: '#FF1744', border: '1px solid rgba(255,23,68,0.5)' }
+                    : { background: 'rgba(0,229,255,0.15)', color: '#00E5FF', border: '1px solid rgba(0,229,255,0.4)' }
+                }>
+                {restoring ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                {restoring ? 'RESTORING…' : mode === 'replace' && confirmReplace ? 'CONFIRM REPLACE' : 'RESTORE'}
+              </button>
+              <button onClick={() => { setPending(null); setConfirmReplace(false); }} disabled={restoring}
+                className="px-3 py-1.5 rounded text-[9px] font-mono text-white/50 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50">
+                CANCEL
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
 //  LIVE ONTOLOGY BUILDER TAB (unchanged)
 // ════════════════════════════════════════════════════════════════
 function OntologyTab({ token }: { token: string | null }) {
@@ -339,7 +582,7 @@ function OntologyTab({ token }: { token: string | null }) {
 
   const handleSelectEntity = useCallback(() => {}, []);
 
-  const addEntity = useCallback(async (type: PersonalEntityType, label: string, description: string) => {
+  const addEntity = useCallback(async (type: string, label: string, description: string) => {
     setBusy('upsert'); setError(null);
     const entity = { id: generateEntityId(type), type, label, description, properties: {}, tags: [], source: 'admin' };
     try {
@@ -403,10 +646,32 @@ function OntologyTab({ token }: { token: string | null }) {
   );
 }
 
-function AddEntityForm({ busy, onAdd, onClose }: { busy: boolean; onAdd: (type: PersonalEntityType, label: string, description: string) => void; onClose: () => void }) {
-  const [type, setType] = useState<PersonalEntityType>('person');
+function AddEntityForm({ busy, onAdd, onClose }: { busy: boolean; onAdd: (type: string, label: string, description: string) => void; onClose: () => void }) {
+  // Type picker is driven by the declarative ontology registry
+  // (osiris-foundation/ontology/*.yaml via /api/ontology/types), with the
+  // built-in personal-ontology types as the fallback when it's unavailable.
+  const { objectTypes, loading } = useOntologyTypes();
+  const typeOptions: { type: string; label: string }[] = objectTypes.length > 0
+    ? objectTypes.map(o => ({ type: o.type, label: o.label }))
+    : (Object.entries(PERSONAL_TYPE_LABELS) as [PersonalEntityType, string][]).map(([t, l]) => ({ type: t, label: l }));
+
+  const [type, setType] = useState<string>('person');
   const [label, setLabel] = useState('');
   const [description, setDescription] = useState('');
+
+  // Keep the selection valid once the registry resolves.
+  useEffect(() => {
+    if (typeOptions.length && !typeOptions.some(o => o.type === type)) setType(typeOptions[0].type);
+  }, [typeOptions, type]);
+
+  // Prefer the declarative colour from the foundation ontology registry;
+  // fall back to the built-in personal-ontology palette, then OSIRIS gold.
+  const colorFor = (t: string) =>
+    objectTypes.find(o => o.type === t)?.color ||
+    PERSONAL_TYPE_COLORS[t as PersonalEntityType] ||
+    '#D4AF37';
+  const labelFor = (t: string) => typeOptions.find(o => o.type === t)?.label || t;
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       className="fixed inset-0 z-[500] flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
@@ -416,17 +681,25 @@ function AddEntityForm({ busy, onAdd, onClose }: { busy: boolean; onAdd: (type: 
           <span className="text-[11px] font-mono font-bold text-[#D4AF37] tracking-wider">ADD ONTOLOGY ENTITY</span>
           <button onClick={onClose} className="text-white/40 hover:text-white"><X className="w-4 h-4" /></button>
         </div>
+        <div className="flex items-center gap-1.5 mb-2">
+          <span className="text-[7px] font-mono text-white/30">
+            {loading ? 'LOADING REGISTRY…' : objectTypes.length > 0 ? `${objectTypes.length} TYPES · osiris-foundation/ontology` : 'BUILT-IN TYPES'}
+          </span>
+        </div>
         <div className="flex flex-wrap gap-1 mb-3">
-          {(Object.entries(PERSONAL_TYPE_COLORS) as [PersonalEntityType, string][]).map(([t, c]) => (
-            <button key={t} onClick={() => setType(t)}
-              className="px-2 py-1 rounded text-[8px] font-mono transition-colors"
-              style={{ backgroundColor: type === t ? `${c}20` : 'rgba(255,255,255,0.03)', color: type === t ? c : 'rgba(255,255,255,0.5)', border: `1px solid ${type === t ? `${c}40` : 'rgba(255,255,255,0.1)'}` }}>
-              {PERSONAL_TYPE_LABELS[t]}
-            </button>
-          ))}
+          {typeOptions.map(({ type: t, label: l }) => {
+            const c = colorFor(t);
+            return (
+              <button key={t} onClick={() => setType(t)}
+                className="px-2 py-1 rounded text-[8px] font-mono transition-colors"
+                style={{ backgroundColor: type === t ? `${c}20` : 'rgba(255,255,255,0.03)', color: type === t ? c : 'rgba(255,255,255,0.5)', border: `1px solid ${type === t ? `${c}40` : 'rgba(255,255,255,0.1)'}` }}>
+                {l}
+              </button>
+            );
+          })}
         </div>
         <input value={label} onChange={e => setLabel(e.target.value)} autoFocus
-          placeholder={`${PERSONAL_TYPE_LABELS[type]} NAME / IDENTIFIER *`}
+          placeholder={`${labelFor(type)} NAME / IDENTIFIER *`}
           className="w-full bg-black/40 text-[9px] font-mono text-white px-2 py-1.5 rounded outline-none border border-white/10 focus:border-[#D4AF37] mb-1.5" />
         <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2}
           placeholder="DESCRIPTION (OPTIONAL)"
@@ -632,7 +905,7 @@ function ConfigField({ label, value, onChange, placeholder, type = 'text', color
       <span className="text-[8px] font-mono text-white/50 w-20 shrink-0">{label}</span>
       <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
         className="flex-1 bg-black/40 text-[8px] font-mono text-white px-2 py-1 rounded outline-none border border-white/10 focus:border-[#D4AF37]"
-        style={color ? { borderColor: `${color}30`, focusBorderColor: color } : {}} />
+        style={color ? { borderColor: `${color}30` } : {}} />
     </div>
   );
 }
