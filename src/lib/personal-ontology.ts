@@ -302,6 +302,152 @@ const CROSS_REF_RULES: {
   },
 ];
 
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]) + 1;
+  return dp[m][n];
+}
+
+function nameSimilarity(a: string, b: string): number {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const na = norm(a), nb = norm(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1.0;
+  // Check if one contains the other
+  if (na.includes(nb) || nb.includes(na)) return 0.9;
+  // Check fuzzy match via Levenshtein
+  const dist = levenshteinDistance(na, nb);
+  const maxLen = Math.max(na.length, nb.length);
+  const sim = 1 - dist / maxLen;
+  if (sim >= 0.85) return 0.85; // Very close match (e.g. "Jon Smith" vs "John Smith")
+  if (sim >= 0.7) return 0.7;  // Close match
+  return 0;
+}
+
+/**
+ * Cross-platform identity resolution: links 'same_as' edges between
+ * entities that fuzzy-name-match OR share a phone/email identifier,
+ * so one human resolves to one ontology entity cluster.
+ */
+const IDENTITY_RESOLUTION_RULES: {
+  label: string;
+  match: (a: PersonalEntity, b: PersonalEntity) => number;
+}[] = [
+  // ── Same phone number across any entity types ──
+  {
+    label: 'same_as',
+    match: (a, b) => {
+      const aPhone = (a.properties.phone || a.properties.number || '').replace(/[^0-9+]/g, '');
+      const bPhone = (b.properties.phone || b.properties.number || '').replace(/[^0-9+]/g, '');
+      if (aPhone && bPhone && aPhone === bPhone && aPhone.length >= 8) return 1.0;
+      if (aPhone && bPhone && aPhone.slice(-8) === bPhone.slice(-8)) return 0.9;
+      return 0;
+    }
+  },
+  // ── Same email across any entity types ──
+  {
+    label: 'same_as',
+    match: (a, b) => {
+      const aEmail = (a.properties.email || '').toLowerCase().trim();
+      const bEmail = (b.properties.email || '').toLowerCase().trim();
+      if (aEmail && bEmail && aEmail === bEmail) return 1.0;
+      return 0;
+    }
+  },
+  // ── Person-to-Person: fuzzy name match across platforms ──
+  {
+    label: 'same_as',
+    match: (a, b) => {
+      if (a.type !== 'person' || b.type !== 'person') return 0;
+      if (a.id === b.id) return 0;
+      const aName = a.label || '';
+      const bName = b.label || '';
+      // Try full name match
+      const fullSim = nameSimilarity(aName, bName);
+      if (fullSim >= 0.85) return fullSim;
+      // Check alias overlap (e.g. "Elena M." == "Elena Morozova")
+      const aAliases: string[] = a.properties.aliases || [];
+      const bAliases: string[] = b.properties.aliases || [];
+      for (const aliasA of [aName, ...aAliases]) {
+        for (const aliasB of [bName, ...bAliases]) {
+          if (nameSimilarity(aliasA, aliasB) >= 0.85) return 0.85;
+        }
+      }
+      return 0;
+    }
+  },
+  // ── Profile-to-Person: display name fuzzy match ──
+  {
+    label: 'same_as',
+    match: (a, b) => {
+      if (a.type === 'social_profile' && b.type === 'person') {
+        const displayName = (a.properties.displayName || a.label || '').toLowerCase();
+        const personName = (b.label || '').toLowerCase();
+        return nameSimilarity(displayName, personName) >= 0.7 ? 0.85 : 0;
+      }
+      if (a.type === 'person' && b.type === 'social_profile') {
+        const displayName = (b.properties.displayName || b.label || '').toLowerCase();
+        const personName = (a.label || '').toLowerCase();
+        return nameSimilarity(displayName, personName) >= 0.7 ? 0.85 : 0;
+      }
+      return 0;
+    }
+  },
+  // ── ID Document to Person: fuzzy name on document ──
+  {
+    label: 'same_as',
+    match: (a, b) => {
+      const [idEntity, personEntity] = a.type === 'personal_id' ? [a, b] : b.type === 'personal_id' ? [b, a] : [null, null];
+      if (!idEntity || personEntity.type !== 'person') return 0;
+      const idName = (idEntity.properties.fullName || '').toLowerCase();
+      const personName = (personEntity.label || '').toLowerCase();
+      return nameSimilarity(idName, personName) >= 0.7 ? 0.85 : 0;
+    }
+  },
+  // ── Photo similarity: shared photo URL or face-embedding hash ──
+  // Full impl requires face-detection API; stub links any entities
+  // sharing the same photo_url or photo_embedding property.
+  {
+    label: 'same_as',
+    match: (a, b) => {
+      const aPhoto = a.properties.photo_url || a.properties.photo || '';
+      const bPhoto = b.properties.photo_url || b.properties.photo || '';
+      if (aPhoto && bPhoto && aPhoto === bPhoto) return 0.95;
+      const aEmbed = a.properties.photo_embedding || '';
+      const bEmbed = b.properties.photo_embedding || '';
+      if (aEmbed && bEmbed && aEmbed === bEmbed) return 0.98;
+      return 0;
+    }
+  },
+  // ── Behavioural fingerprint: shared timezone + language pattern ──
+  // Full impl analyses posting times, language model; stub checks
+  // explicit timezone/language properties set by connectors.
+  {
+    label: 'same_as',
+    match: (a, b) => {
+      const aTz = a.properties.timezone || '';
+      const bTz = b.properties.timezone || '';
+      const aLang = a.properties.language || '';
+      const bLang = b.properties.language || '';
+      let score = 0;
+      if (aTz && bTz && aTz === bTz) score += 0.4;
+      if (aLang && bLang && aLang === bLang) score += 0.3;
+      // Location overlap: similar GPS coordinates
+      if (a.coordinates && b.coordinates) {
+        const d = haversineKm(a.coordinates.lat, a.coordinates.lng, b.coordinates.lat, b.coordinates.lng);
+        if (d < 10) score += 0.3;
+        else if (d < 50) score += 0.15;
+      }
+      return Math.min(score, 0.95);
+    }
+  },
+];
+
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -339,6 +485,25 @@ export function crossReferenceStore(store: PersonalStore): PersonalRelationship[
             strength: confidence,
             createdAt: new Date().toISOString(),
           });
+        }
+      }
+      // ── Identity resolution pass: fuzzy/identifier matching across all types ──
+      for (const rule of IDENTITY_RESOLUTION_RULES) {
+        if (src.id === tgt.id) continue;
+        const key = `${src.id}:${tgt.id}:${rule.label}`;
+        if (existing.has(key)) continue;
+        const confidence = rule.match(src, tgt);
+        if (confidence > 0.5) {
+          newRels.push({
+            id: `rel_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            sourceId: src.id,
+            targetId: tgt.id,
+            label: rule.label,
+            strength: confidence,
+            metadata: { autoDiscovered: true, rule: 'identity_resolution' },
+            createdAt: new Date().toISOString(),
+          });
+          existing.add(key);
         }
       }
     }

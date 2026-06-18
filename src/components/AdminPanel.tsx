@@ -32,10 +32,11 @@ import {
   PERSONAL_TYPE_COLORS, PERSONAL_TYPE_LABELS, generateEntityId,
 } from '@/lib/personal-ontology';
 import { useOntologyTypes } from '@/lib/useOntologyTypes';
+import IdentityTab from './IdentityTab';
 
 const LinkEditorGraph = dynamic(() => import('./LinkEditorGraph'), { ssr: false });
 
-type AdminTab = 'users' | 'ontology' | 'connectors' | 'backup';
+type AdminTab = 'users' | 'ontology' | 'connectors' | 'backup' | 'identity';
 type ConnectorTab = 'twitter' | 'youtube' | 'facebook' | 'linkedin' | 'whatsapp' | 'bulk-import';
 type BulkImportType = 'person-ids' | 'phone-contacts' | 'persons-and-jobs';
 
@@ -176,6 +177,14 @@ export default function AdminPanel({ show, onClose }: Props) {
               }}>
               <HardDriveDownload className="w-3 h-3" /> BACKUP &amp; RESTORE
             </button>
+            <button onClick={() => setTab('identity')}
+              className="flex items-center gap-1 px-3 py-1.5 text-[8px] font-mono transition-colors"
+              style={{
+                backgroundColor: tab === 'identity' ? 'rgba(179,136,255,0.15)' : 'rgba(255,255,255,0.03)',
+                color: tab === 'identity' ? '#B388FF' : 'rgba(255,255,255,0.5)',
+              }}>
+              <UserCheck className="w-3 h-3" /> IDENTITY
+            </button>
           </div>
           <button onClick={onClose} className="p-1 hover:bg-[#FF1744]/20 rounded transition-colors">
             <X className="w-4 h-4 text-[#FF1744]" />
@@ -188,6 +197,7 @@ export default function AdminPanel({ show, onClose }: Props) {
         {tab === 'ontology' && <OntologyTab token={token} />}
         {tab === 'connectors' && <ConnectorsTab token={token} />}
         {tab === 'backup' && <BackupTab token={token} />}
+        {tab === 'identity' && <IdentityTab token={token} />}
       </div>
     </motion.div>
   );

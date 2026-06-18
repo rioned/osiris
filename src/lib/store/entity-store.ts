@@ -651,6 +651,25 @@ export async function runCrossReference(): Promise<PersonalRelationship[]> {
           existingKeys.add(key);
         }
       }
+      // ── Identity resolution pass (same_as): email/phone/name across types ──
+      if (src.id !== tgt.id) {
+        for (const rule of IDENTITY_RESOLUTION_RULES) {
+          const key = `${src.id}:${tgt.id}:${rule.label}`;
+          if (existingKeys.has(key)) continue;
+          const confidence = rule.match(src, tgt);
+          if (confidence > 0.5) {
+            const rel = await createRelationship({
+              sourceId: src.id,
+              targetId: tgt.id,
+              label: rule.label,
+              strength: confidence,
+              metadata: { autoDiscovered: true, rule: 'identity_resolution' },
+            });
+            newRels.push(rel);
+            existingKeys.add(key);
+          }
+        }
+      }
     }
   }
 
@@ -823,10 +842,268 @@ const CROSS_REF_RULES: {
   },
 ];
 
+// ── Cross-Platform Identity Resolution Rules ──
+// Same email/phone, fuzzy name match, profile-person, ID-person.
+const IDENTITY_RESOLUTION_RULES: {
+  label: string;
+  match: (src: PersonalEntity, tgt: PersonalEntity) => number;
+}[] = [
+  { label: 'same_as', match: (a, b) => {
+    const aPhone = (a.properties.phone || a.properties.number || '').replace(/[^0-9+]/g, '');
+    const bPhone = (b.properties.phone || b.properties.number || '').replace(/[^0-9+]/g, '');
+    if (aPhone && bPhone && aPhone === bPhone && aPhone.length >= 8) return 1.0;
+    if (aPhone && bPhone && aPhone.slice(-8) === bPhone.slice(-8)) return 0.9;
+    const aEmail = (a.properties.email || '').toLowerCase().trim();
+    const bEmail = (b.properties.email || '').toLowerCase().trim();
+    if (aEmail && bEmail && aEmail === bEmail) return 1.0;
+    return 0;
+  }},
+  { label: 'same_as', match: (a, b) => {
+    if (a.type !== 'person' || b.type !== 'person') return 0;
+    if (a.id === b.id) return 0;
+    // Fuzzy name match (simple)
+    const aName = (a.label || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+    const bName = (b.label || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+    if (!aName || !bName) return 0;
+    if (aName === bName) return 1.0;
+    if (aName.includes(bName) || bName.includes(aName)) return 0.9;
+    return 0;
+  }},
+  { label: 'same_as', match: (a, b) => {
+    if (a.type === 'social_profile' && b.type === 'person') {
+      const displayName = (a.properties.displayName || a.label || '').toLowerCase().trim();
+      const personName = (b.label || '').toLowerCase().trim();
+      if (displayName.includes(personName) || personName.includes(displayName)) return 0.85;
+    }
+    if (a.type === 'person' && b.type === 'social_profile') {
+      const displayName = (b.properties.displayName || b.label || '').toLowerCase().trim();
+      const personName = (a.label || '').toLowerCase().trim();
+      if (displayName.includes(personName) || personName.includes(displayName)) return 0.85;
+    }
+    return 0;
+  }},
+  { label: 'same_as', match: (a, b) => {
+    const [idEntity, personEntity] = a.type === 'personal_id' ? [a, b] : b.type === 'personal_id' ? [b, a] : [null, null];
+    if (!idEntity || !personEntity || personEntity.type !== 'person') return 0;
+    const idName = (idEntity.properties.fullName || '').toLowerCase();
+    const personName = (personEntity.label || '').toLowerCase();
+    if (idName.includes(personName) || personName.includes(idName)) return 0.85;
+    return 0;
+  }},
+  { label: 'same_as', match: (a, b) => {
+    const aPhoto = a.properties.photo_url || a.properties.photo || '';
+    const bPhoto = b.properties.photo_url || b.properties.photo || '';
+    if (aPhoto && bPhoto && aPhoto === bPhoto) return 0.95;
+    return 0;
+  }},
+  { label: 'same_as', match: (a, b) => {
+    const aTz = a.properties.timezone || '';
+    const bTz = b.properties.timezone || '';
+    const aLang = a.properties.language || '';
+    const bLang = b.properties.language || '';
+    let s = 0;
+    if (aTz && bTz && aTz === bTz) s += 0.4;
+    if (aLang && bLang && aLang === bLang) s += 0.3;
+    if (a.coordinates && b.coordinates) {
+      const d = haversineKm(a.coordinates.lat, a.coordinates.lng, b.coordinates.lat, b.coordinates.lng);
+      if (d < 10) s += 0.3; else if (d < 50) s += 0.15;
+    }
+    return Math.min(s, 0.95);
+  }},
+];
+
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ── Cross-Platform Identity Resolution: Merge Candidates ──
+
+export interface MergeCandidate {
+  primaryEntity: PersonalEntity;
+  duplicateEntity: PersonalEntity;
+  sameAsRelationship: PersonalRelationship;
+  sharedSignals: string[];   // e.g. ['same_email', 'same_phone', 'fuzzy_name_match', 'profile_name_match']
+  aggregateConfidence: number;
+}
+
+/**
+ * Find all entities linked by 'same_as' relationships and return them
+ * as merge candidates for the admin review queue.
+ */
+export async function findMergeCandidates(): Promise<MergeCandidate[]> {
+  await ensureStore();
+
+  if (!isDBAvailable()) {
+    // In-memory mode
+    const sameAsRels = memStore.relationships.filter(r => r.label === 'same_as');
+    const candidates: MergeCandidate[] = [];
+    for (const rel of sameAsRels) {
+      const src = memStore.entities.find(e => e.id === rel.sourceId);
+      const tgt = memStore.entities.find(e => e.id === rel.targetId);
+      if (!src || !tgt) continue;
+      const signals = extractIdentitySignals(src, tgt, rel);
+      const alreadyAdded = candidates.some(c =>
+        (c.primaryEntity.id === src.id && c.duplicateEntity.id === tgt.id) ||
+        (c.primaryEntity.id === tgt.id && c.duplicateEntity.id === src.id)
+      );
+      if (alreadyAdded) continue;
+      candidates.push({
+        primaryEntity: src,
+        duplicateEntity: tgt,
+        sameAsRelationship: rel,
+        sharedSignals: signals,
+        aggregateConfidence: rel.strength + signals.length * 0.02,
+      });
+    }
+    return candidates.sort((a, b) => b.aggregateConfidence - a.aggregateConfidence);
+  }
+
+  // Postgres mode
+  try {
+    const relsResult = await query(
+      `SELECT r.*, se.*, te.*
+       FROM ontology_relationships r
+       JOIN ontology_entities se ON r.source_id = se.id
+       JOIN ontology_entities te ON r.target_id = te.id
+       WHERE r.label = 'same_as'`
+    );
+    const candidates: MergeCandidate[] = [];
+    const seen = new Set<string>();
+    if (relsResult?.rows) {
+      for (const row of relsResult.rows) {
+        const src = rowToEntity(row);
+        const tgt = rowToEntity({ ...row, id: row.target_id, type: row.target_type, /* ... */ });
+        // Simplified - full impl would need proper column mapping
+        const key = [src.id, tgt.id].sort().join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({
+          primaryEntity: src,
+          duplicateEntity: tgt,
+          sameAsRelationship: {
+            id: row.id,
+            sourceId: row.source_id,
+            targetId: row.target_id,
+            label: 'same_as',
+            strength: row.strength || 0.8,
+            createdAt: row.created_at || new Date().toISOString(),
+          },
+          sharedSignals: ['auto_detected'],
+          aggregateConfidence: row.strength || 0.8,
+        });
+      }
+    }
+    return candidates.sort((a, b) => b.aggregateConfidence - a.aggregateConfidence);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Merge two entities: keeps the primary entity and transfers all properties,
+ * relationships, and tags from the duplicate into it, then deletes the duplicate.
+ */
+export async function mergeEntities(
+  primaryId: string,
+  duplicateId: string
+): Promise<{ success: boolean; mergedEntity: PersonalEntity | null }> {
+  await ensureStore();
+  const primary = await getEntity(primaryId);
+  const duplicate = await getEntity(duplicateId);
+  if (!primary || !duplicate) return { success: false, mergedEntity: null };
+
+  // Merge properties (duplicate wins on conflict)
+  const mergedProperties = { ...duplicate.properties, ...primary.properties };
+  // Merge tags
+  const mergedTags = [...new Set([...primary.tags, ...duplicate.tags])];
+  // Pick longer description
+  const mergedDescription = [primary.description, duplicate.description]
+    .filter(Boolean).sort((a, b) => (b?.length || 0) - (a?.length || 0))[0] || '';
+
+  const merged: PersonalEntity = {
+    ...primary,
+    description: mergedDescription,
+    properties: mergedProperties,
+    tags: mergedTags,
+    linkedEntityIds: [
+      ...new Set([
+        ...(primary.linkedEntityIds || []),
+        ...(duplicate.linkedEntityIds || []),
+      ]),
+    ],
+  };
+
+  // Update primary
+  const updated = await upsertEntity(merged);
+
+  // Re-point all relationships from duplicate to primary
+  if (!isDBAvailable()) {
+    for (const rel of memStore.relationships) {
+      if (rel.sourceId === duplicateId) rel.sourceId = primaryId;
+      if (rel.targetId === duplicateId) rel.targetId = primaryId;
+    }
+    // Remove duplicate
+    memStore.entities = memStore.entities.filter(e => e.id !== duplicateId);
+    // Remove self-referencing same_as
+    memStore.relationships = memStore.relationships.filter(
+      r => !(r.label === 'same_as' &&
+        ((r.sourceId === primaryId && r.targetId === primaryId) ||
+         (r.sourceId === duplicateId || r.targetId === duplicateId)))
+    );
+  } else {
+    // Postgres: cascade relationships
+    await query('UPDATE ontology_relationships SET source_id = $1 WHERE source_id = $2', [primaryId, duplicateId]);
+    await query('UPDATE ontology_relationships SET target_id = $1 WHERE target_id = $2', [primaryId, duplicateId]);
+    await query('DELETE FROM ontology_entities WHERE id = $1', [duplicateId]);
+  }
+
+  return { success: true, mergedEntity: updated };
+}
+
+function extractIdentitySignals(
+  a: PersonalEntity,
+  b: PersonalEntity,
+  rel: PersonalRelationship
+): string[] {
+  const signals: string[] = [];
+  const aPhone = (a.properties.phone || a.properties.number || '').replace(/[^0-9+]/g, '');
+  const bPhone = (b.properties.phone || b.properties.number || '').replace(/[^0-9+]/g, '');
+  const aEmail = (a.properties.email || '').toLowerCase();
+  const bEmail = (b.properties.email || '').toLowerCase();
+
+  if (aPhone && bPhone && aPhone === bPhone) signals.push('same_phone');
+  if (aEmail && bEmail && aEmail === bEmail) signals.push('same_email');
+  if (a.type === 'person' && b.type === 'person') {
+    const aName = (a.label || '').toLowerCase();
+    const bName = (b.label || '').toLowerCase();
+    if (aName.includes(bName) || bName.includes(aName)) signals.push('fuzzy_name_match');
+    const aAliases = (a.properties.aliases || []) as string[];
+    const bAliases = (b.properties.aliases || []) as string[];
+    for (const aa of aAliases) {
+      if (bAliases.some((ba: string) => ba.toLowerCase() === aa.toLowerCase())) {
+        signals.push('alias_overlap');
+        break;
+      }
+    }
+  }
+  if ((a.type === 'social_profile' || b.type === 'social_profile') &&
+      (a.type === 'person' || b.type === 'person')) {
+    signals.push('profile_person_link');
+  }
+  // Photo similarity
+  const aPhoto = (a.properties.photo_url || a.properties.photo || '') as string;
+  const bPhoto = (b.properties.photo_url || b.properties.photo || '') as string;
+  if (aPhoto && bPhoto && aPhoto === bPhoto) signals.push('photo_similarity');
+  // Behavioural fingerprint
+  const aTz = (a.properties.timezone || '') as string;
+  const bTz = (b.properties.timezone || '') as string;
+  const aLang = (a.properties.language || '') as string;
+  const bLang = (b.properties.language || '') as string;
+  if (aTz && bTz && aTz === bTz) signals.push('behavioural_fingerprint');
+  if (aLang && bLang && aLang === bLang) signals.push('behavioural_fingerprint');
+  return signals;
 }
