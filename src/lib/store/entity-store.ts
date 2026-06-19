@@ -145,6 +145,12 @@ export async function getEntities(options?: {
   nlpToxicityMin?: number;
   /** Only return entities that have been NLP-enriched */
   nlpEnriched?: boolean;
+  /** Filter entities with stance toward a specific target */
+  stanceTarget?: string;
+  /** Filter by stance sentiment: 'positive', 'negative', 'neutral', 'mixed' */
+  stanceSentiment?: string;
+  /** Only return entities that have stance profiles */
+  hasStance?: boolean;
 }): Promise<{ entities: PersonalEntity[]; total: number }> {
   await ensureStore();
 
@@ -158,6 +164,19 @@ export async function getEntities(options?: {
       return !isNaN(score) && score >= (options.nlpToxicityMin ?? 0);
     });
     if (options?.nlpEnriched) filtered = filtered.filter(e => e.properties?.nlp_enriched === true);
+    // Stance filters (in-memory)
+    if (options?.stanceTarget) filtered = filtered.filter(e => {
+      const tags: string[] = e.properties?.stance_tags || [];
+      return tags.some(t => t.startsWith(`stance:${options.stanceTarget!.toLowerCase().replace(/[^a-z0-9]/gi, '_')}:`));
+    });
+    if (options?.stanceSentiment) filtered = filtered.filter(e => {
+      const tags: string[] = e.properties?.stance_tags || [];
+      return tags.some(t => t.endsWith(`:${options.stanceSentiment}`));
+    });
+    if (options?.hasStance) filtered = filtered.filter(e => {
+      const profiles = e.properties?.stance_profiles;
+      return profiles && typeof profiles === 'object' && Object.keys(profiles).length > 0;
+    });
     if (options?.search) {
       const q = options.search.toLowerCase();
       filtered = filtered.filter(e =>
@@ -200,6 +219,17 @@ export async function getEntities(options?: {
   }
   if (options?.nlpEnriched) {
     conditions.push(`properties->>'nlp_enriched' = 'true'`);
+  }
+  // Stance filters (Postgres JSONB)
+  if (options?.stanceTarget) {
+    const safeTarget = options.stanceTarget.toLowerCase().replace(/[^a-z0-9]/gi, '_');
+    conditions.push(`properties->'stance_tags' ? 'stance:${safeTarget}:positive' OR properties->'stance_tags' ? 'stance:${safeTarget}:negative' OR properties->'stance_tags' ? 'stance:${safeTarget}:neutral' OR properties->'stance_tags' ? 'stance:${safeTarget}:mixed'`);
+  }
+  if (options?.stanceSentiment) {
+    conditions.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(properties->'stance_tags', '[]'::jsonb)) AS tag WHERE tag LIKE '%:${options.stanceSentiment}')`);
+  }
+  if (options?.hasStance) {
+    conditions.push(`properties ? 'stance_profiles'`);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

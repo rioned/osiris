@@ -73,6 +73,9 @@ export async function GET(req: NextRequest) {
       nlpLanguage: searchParams.get('nlp_language') || undefined,
       nlpToxicityMin: searchParams.get('nlp_toxicity_min') ? parseFloat(searchParams.get('nlp_toxicity_min')!) : undefined,
       nlpEnriched: searchParams.get('nlp_enriched') === 'true' ? true : undefined,
+      stanceTarget: searchParams.get('stance_target') || undefined,
+      stanceSentiment: searchParams.get('stance_sentiment') || undefined,
+      hasStance: searchParams.get('has_stance') === 'true' ? true : undefined,
     });
 
     return NextResponse.json(result);

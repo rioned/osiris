@@ -28,6 +28,7 @@ import {
 } from './store/entity-store';
 import { PersonalEntity, PersonalDomain } from './personal-ontology';
 import { enrichText } from './nlp/pipeline';
+import { runStanceIntegration, type ActorStanceCollection, type StanceEvidence, type StanceProfile } from './nlp/stance';
 
 // ── Social Relationship Types ──
 
@@ -256,6 +257,61 @@ export async function reconstructSocialGraph(
 
       result.breakdown[rel].relationships++;
       result.relationshipsCreated++;
+
+      // ── Step 4: Target-stance & opinion mining ──
+      // When the author creates a post/comment with text, analyze their
+      // stance toward detected targets and update their entity profile.
+      if (!isActorTarget) {
+        const obj = interaction.target as SocialObject;
+        const hasText = obj.text && obj.text.trim().length > 10;
+        const isPostOrComment = obj.type === 'post' || obj.type === 'comment';
+
+        if (hasText && isPostOrComment) {
+          try {
+            // Get current actor entity properties (may already have stance data)
+            const actorEntity = await getEntity(actorEntityId);
+            const existingStanceProfiles: Record<string, StanceProfile> | null =
+              actorEntity?.properties?.stance_profiles || null;
+
+            // Map interaction type
+            let stanceInteractionType: StanceEvidence['interactionType'] = 'post';
+            if (rel === 'liked') stanceInteractionType = 'like';
+            else if (rel === 'shared') stanceInteractionType = 'share';
+            else if (rel === 'commented_on' || rel === 'replied_to') stanceInteractionType = 'comment';
+            else if (rel === 'mentioned') stanceInteractionType = 'post';
+
+            const result = runStanceIntegration(
+              actorEntityId,
+              obj.text!,
+              stanceInteractionType,
+              interaction.timestamp || new Date().toISOString(),
+              existingStanceProfiles,
+              targetEntityId,
+              interaction.platform || interaction.actor.platform,
+            );
+
+            // Update actor entity with stance properties if any targets scored
+            if (result.scoredTargets.length > 0) {
+              const updatedEntity = await getEntity(actorEntityId);
+              if (updatedEntity) {
+                await upsertEntity({
+                  ...updatedEntity,
+                  properties: {
+                    ...updatedEntity.properties,
+                    ...result.entityProperties,
+                  },
+                  tags: [...new Set([...updatedEntity.tags, ...result.tags])],
+                });
+              }
+            }
+          } catch (stanceErr: any) {
+            // Stance integration is non-fatal
+            if (process.env.NODE_ENV === 'development') {
+              console.warn(`[Stance] Integration error: ${stanceErr.message}`);
+            }
+          }
+        }
+      }
     } catch (err: any) {
       result.warnings.push(`Error processing ${rel}: ${err.message}`);
     }
