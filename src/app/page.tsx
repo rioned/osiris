@@ -23,20 +23,25 @@ import AIChatPanel from '@/components/AIChatPanel';
 import CorrelationPanel from '@/components/CorrelationPanel';
 import WorkspacePanel from '@/components/WorkspacePanel';
 import PlaybookPanel from '@/components/PlaybookPanel';
-import ClausedPipelinePanel from '@/components/ClausedPipelinePanel';
-import PersonalGraphPanel from '@/components/PersonalGraphPanel';
 import { evaluatePlaybooks, type Playbook } from '@/lib/playbook-engine';
 import { AuthProvider } from '@/components/AuthProvider';
 import LoginModal from '@/components/LoginModal';
 import UserMenu from '@/components/UserMenu';
-import AdminPanel from '@/components/AdminPanel';
-import PluginPanel from '@/components/PluginPanel';
 
 const OsirisMap = dynamic(() => import('@/components/OsirisMap'), { ssr: false });
 const LayerPanel = dynamic(() => import('@/components/LayerPanel'));
 const CameraViewer = dynamic(() => import('@/components/CameraViewer'));
 const OsintPanel = dynamic(() => import('@/components/OsintPanel'));
 const EntityGraphPanel = dynamic(() => import('@/components/EntityGraphPanel'));
+
+// Heavy, infrequently-opened panels are code-split so their JS only downloads
+// when the user actually opens them. Each render site is gated behind its
+// `show*` flag, so the chunk stays out of the initial bundle entirely —
+// keeping first load light for the 20M-user fleet.
+const PersonalGraphPanel = dynamic(() => import('@/components/PersonalGraphPanel'), { ssr: false });
+const ClausedPipelinePanel = dynamic(() => import('@/components/ClausedPipelinePanel'), { ssr: false });
+const AdminPanel = dynamic(() => import('@/components/AdminPanel'), { ssr: false });
+const PluginPanel = dynamic(() => import('@/components/PluginPanel'), { ssr: false });
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
@@ -1434,11 +1439,11 @@ function saveOsirisState(v: any) {
       {/* ── LOGIN MODAL ── */}
       <LoginModal isOpen={showLoginModal} onClose={() => setShowLoginModal(false)} />
 
-      {/* ── Admin Console (admin-only; self-gates internally) ── */}
-      <AdminPanel show={showAdminPanel} onClose={() => setShowAdminPanel(false)} />
+      {/* ── Admin Console (admin-only; lazy-loaded on open) ── */}
+      {showAdminPanel && <AdminPanel show={showAdminPanel} onClose={() => setShowAdminPanel(false)} />}
 
-      {/* ── Plugin Console (admin-only; self-gates internally) ── */}
-      <PluginPanel show={showPluginPanel} onClose={() => setShowPluginPanel(false)} />
+      {/* ── Plugin Console (admin-only; lazy-loaded on open) ── */}
+      {showPluginPanel && <PluginPanel show={showPluginPanel} onClose={() => setShowPluginPanel(false)} />}
 
       {/* Shortcut hint */}
       <div className="desktop-only absolute bottom-[26px] right-5 z-[200] pointer-events-none text-[6px] font-mono text-[var(--text-muted)]/40 tracking-widest">

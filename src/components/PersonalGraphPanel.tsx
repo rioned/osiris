@@ -20,7 +20,7 @@ import {
   crossReferenceStore, generateEntityId, makeRelationship,
 } from '@/lib/personal-ontology';
 import {
-  analyzeGraph, findShortestPath, communityColor,
+  communityColor,
   type GraphAnalyticsResult, type PathResult,
 } from '@/lib/graph-analytics';
 import {
@@ -316,60 +316,111 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
     rebuildGraph(updated);
   }, [store, rebuildGraph]);
 
-  // Search filter
-  const filteredNodes = searchQuery
-    ? graphData.nodes.filter(n =>
-        n.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        n.type.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        JSON.stringify(n.properties).toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : graphData.nodes;
+  // Max nodes drawn on the force canvas at once. Beyond this the simulation and
+  // per-frame canvas painting are what actually freeze the tab, so we cap the
+  // rendered set (most-connected nodes win) while analytics/search still run
+  // over the full graph server-side.
+  const MAX_RENDER_NODES = 600;
 
-  const filteredLinks = searchQuery
-    ? graphData.links.filter(l => {
-        const src = filteredNodes.find(n => n.id === (typeof l.source === 'string' ? l.source : l.source.id));
-        const tgt = filteredNodes.find(n => n.id === (typeof l.target === 'string' ? l.target : l.target.id));
-        return src && tgt;
+  // ── Search + type filtering ──
+  // Built with O(n+m) Set/Map lookups instead of `.find()` inside `.filter()`
+  // (which was O(n·m) and a primary cause of the UI freeze on large graphs).
+  const endId = (e: string | { id: string }) => (typeof e === 'string' ? e : e.id);
+
+  const { displayGraph, renderTruncated } = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+
+    // 1. Node filter (search text + type) in a single pass.
+    let nodes = graphData.nodes;
+    if (q) {
+      nodes = nodes.filter(n =>
+        n.label.toLowerCase().includes(q) ||
+        n.type.toLowerCase().includes(q) ||
+        JSON.stringify(n.properties).toLowerCase().includes(q)
+      );
+    }
+    if (activeFilter !== 'all') {
+      nodes = nodes.filter(n => n.type === activeFilter);
+    }
+
+    // 2. Keep only links whose endpoints both survive — O(m) via a Set.
+    const idSet = new Set(nodes.map(n => n.id));
+    let links = graphData.links.filter(l => idSet.has(endId(l.source)) && idSet.has(endId(l.target)));
+
+    // 3. Render cap: if the filtered set is still huge, draw the most-connected
+    //    nodes (their links carry the most signal) and flag the truncation.
+    let truncated = false;
+    if (nodes.length > MAX_RENDER_NODES) {
+      truncated = true;
+      const degree = new Map<string, number>();
+      for (const l of links) {
+        const a = endId(l.source), b = endId(l.target);
+        degree.set(a, (degree.get(a) || 0) + 1);
+        degree.set(b, (degree.get(b) || 0) + 1);
+      }
+      nodes = [...nodes]
+        .sort((x, y) => (degree.get(y.id) || 0) - (degree.get(x.id) || 0))
+        .slice(0, MAX_RENDER_NODES);
+      const keep = new Set(nodes.map(n => n.id));
+      links = links.filter(l => keep.has(endId(l.source)) && keep.has(endId(l.target)));
+    }
+
+    return { displayGraph: { nodes, links } as PersonalGraphData, renderTruncated: truncated };
+  }, [graphData, searchQuery, activeFilter]);
+
+  // ── Analytics computation (server-side) ──
+  // Louvain community detection, Brandes betweenness, eigenvector centrality
+  // and pathfinding are O(V·E) and would freeze the browser's main thread on a
+  // large graph. They now run on the server via /api/ontology/analytics — the
+  // panel only POSTs the current graph and renders the returned scores. This
+  // keeps the browser lightweight even as the underlying graph scales to the
+  // 20M-user / billions-of-edges fleet.
+  const [analytics, setAnalytics] = useState<GraphAnalyticsResult | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [pathResult, setPathResult] = useState<PathResult | null>(null);
+
+  // Serialise the store graph once per change for the analytics requests.
+  const analyticsGraph = useMemo(() => ({
+    nodes: store.entities.map(e => ({ id: e.id })),
+    links: store.relationships.map(r => ({ source: r.sourceId, target: r.targetId, strength: r.strength })),
+  }), [store.entities.length, store.relationships.length]);
+
+  useEffect(() => {
+    if (!showAnalytics || store.entities.length === 0) {
+      setAnalytics(null);
+      return;
+    }
+    let cancelled = false;
+    setAnalyticsLoading(true);
+    // Debounce so rapid edits don't spam the analytics endpoint.
+    const t = setTimeout(() => {
+      fetch('/api/ontology/analytics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'analyze', graph: analyticsGraph }),
       })
-    : graphData.links;
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => { if (!cancelled && data && !data.error) setAnalytics(data as GraphAnalyticsResult); })
+        .catch(() => { /* leave previous analytics in place on transient failure */ })
+        .finally(() => { if (!cancelled) setAnalyticsLoading(false); });
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [showAnalytics, analyticsGraph, store.entities.length]);
 
-  // Type filter
-  const typeFilteredNodes = activeFilter === 'all'
-    ? filteredNodes
-    : filteredNodes.filter(n => n.type === activeFilter);
-
-  const typeFilteredLinks = filteredLinks.filter(l => {
-    const src = typeFilteredNodes.find(n => n.id === (typeof l.source === 'string' ? l.source : l.source.id));
-    const tgt = typeFilteredNodes.find(n => n.id === (typeof l.target === 'string' ? l.target : l.target.id));
-    return src && tgt;
-  });
-
-  const displayGraph: PersonalGraphData = { nodes: typeFilteredNodes, links: typeFilteredLinks };
-
-  // ── Analytics computation ──
-  // Runs Louvain community detection + centrality over the raw store graph
-  // (string-id links, before the force layout mutates them into object refs).
-  // Memoised on the entity/relationship counts so it only recomputes when the
-  // graph actually changes — keeps the force simulation smooth.
-  const analytics: GraphAnalyticsResult | null = useMemo(() => {
-    if (!showAnalytics || store.entities.length === 0) return null;
-    return analyzeGraph({
-      nodes: store.entities.map(e => ({ id: e.id })),
-      links: store.relationships.map(r => ({ source: r.sourceId, target: r.targetId, strength: r.strength })),
-    });
-  }, [showAnalytics, store.entities.length, store.relationships.length]);
-
-  // Shortest path between the two picked endpoints.
-  const pathResult: PathResult | null = useMemo(() => {
-    if (!pathSource || !pathTarget) return null;
-    return findShortestPath(
-      {
-        nodes: store.entities.map(e => ({ id: e.id })),
-        links: store.relationships.map(r => ({ source: r.sourceId, target: r.targetId, strength: r.strength })),
-      },
-      pathSource, pathTarget,
-    );
-  }, [pathSource, pathTarget, store.entities.length, store.relationships.length]);
+  // Shortest path between the two picked endpoints (computed server-side).
+  useEffect(() => {
+    if (!pathSource || !pathTarget) { setPathResult(null); return; }
+    let cancelled = false;
+    fetch('/api/ontology/analytics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'path', graph: analyticsGraph, from: pathSource, to: pathTarget }),
+    })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (!cancelled && data && !data.error) setPathResult(data as PathResult); })
+      .catch(() => { if (!cancelled) setPathResult(null); });
+    return () => { cancelled = true; };
+  }, [pathSource, pathTarget, analyticsGraph]);
 
   // Fast lookups used by the canvas painters.
   const pathNodeSet = useMemo(() => new Set(pathResult?.path || []), [pathResult]);
@@ -659,9 +710,19 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
             <div className="flex-1 overflow-y-auto styled-scrollbar p-3 space-y-4">
               {!analytics ? (
                 <div className="text-center py-8">
-                  <Network className="w-8 h-8 mx-auto mb-2 text-white/20" />
-                  <p className="text-[9px] font-mono text-white/30">Add entities and relationships</p>
-                  <p className="text-[8px] font-mono text-white/20 mt-1">to run community detection & centrality</p>
+                  {analyticsLoading ? (
+                    <>
+                      <Loader2 className="w-8 h-8 mx-auto mb-2 text-[#06D6A0]/60 animate-spin" />
+                      <p className="text-[9px] font-mono text-white/30">Computing analytics server-side…</p>
+                      <p className="text-[8px] font-mono text-white/20 mt-1">community detection & centrality</p>
+                    </>
+                  ) : (
+                    <>
+                      <Network className="w-8 h-8 mx-auto mb-2 text-white/20" />
+                      <p className="text-[9px] font-mono text-white/30">Add entities and relationships</p>
+                      <p className="text-[8px] font-mono text-white/20 mt-1">to run community detection & centrality</p>
+                    </>
+                  )}
                 </div>
               ) : (
                 <>
@@ -882,6 +943,14 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
             onSelectEntity={handleSelectEntityById}
           />
         ) : displayGraph.nodes.length > 0 ? (
+          <>
+          {renderTruncated && (
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded border border-[#FF6D00]/40 bg-[#1a0f00]/90 backdrop-blur-sm">
+              <span className="text-[9px] font-mono text-[#FF6D00] tracking-wider">
+                SHOWING TOP {MAX_RENDER_NODES} OF {graphData.nodes.length} NODES · refine search to see more · analytics run over the full graph
+              </span>
+            </div>
+          )}
           <ForceGraph2D
             ref={graphRef}
             graphData={displayGraph}
@@ -900,6 +969,7 @@ function PersonalGraphPanelInner({ show, onClose, onLocate, mapVisible, onToggle
             linkDirectionalParticleSpeed={0.004}
             linkDirectionalParticleColor={() => 'rgba(212,175,55,0.6)'}
           />
+          </>
         ) : (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="text-center">
