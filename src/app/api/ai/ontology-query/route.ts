@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
 
     switch (action) {
       case 'ingest':
-        return handleAgenticIngest(body);
+        return handleAgenticIngest(body, req);
       case 'query':
         return handleOntologyQuery(body);
       case 'suggest':
@@ -67,10 +67,11 @@ export async function POST(req: NextRequest) {
 
 // ── Agentic Ingestion: Unstructured data → structured entities + relations ──
 
-async function handleAgenticIngest(body: any) {
+async function handleAgenticIngest(body: any, req?: NextRequest) {
   const rawData = body.data || body.text || '';
   const fileName = body.fileName || 'unknown';
   const fileType = body.fileType || 'text';
+  const baseUrl = req ? `${req.nextUrl.protocol}//${req.nextUrl.host}` : (process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000');
 
   if (!rawData) {
     return NextResponse.json({ error: 'No data provided' }, { status: 400 });
@@ -188,12 +189,73 @@ Parse all entities and relationships from this data. Return ONLY the JSON.`;
   const validEntityIds = new Set(entities.map((e: any) => e.id));
   const validRels = relationships.filter((r: any) => validEntityIds.has(r.sourceId) && validEntityIds.has(r.targetId));
 
+  // ── PERSIST extracted entities + relationships to the entity store ──
+  let persistErrors: string[] = [];
+  let stored = 0;
+
+  if (entities.length > 0) {
+    try {
+      // Save entities in batch via the entity store API (internal call)
+      const batchRes = await fetch(`${baseUrl}/api/ontology/entities`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'batch',
+          entities: entities.map((e: any) => ({
+            id: e.id,
+            type: e.type,
+            domain: mapDomain(e.type || 'person'),
+            label: e.label || 'Unknown',
+            description: e.description || '',
+            coordinates: e.coordinates || null,
+            properties: e.properties || {},
+            tags: [],
+            source: 'ai-ingestion',
+            createdAt: now,
+            updatedAt: now,
+          })),
+        }),
+      });
+      if (batchRes.ok) {
+        const batchData = await batchRes.json();
+        stored = batchData.count || 0;
+      } else {
+        persistErrors.push(`Batch entity save returned ${batchRes.status}`);
+      }
+    } catch (e: any) {
+      persistErrors.push(`Entity persist error: ${e.message}`);
+    }
+  }
+
+  // Save relationships
+  let relStored = 0;
+  for (const rel of validRels) {
+    try {
+      const relRes = await fetch(`${baseUrl}/api/ontology/entities`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'relate',
+          sourceId: rel.sourceId,
+          targetId: rel.targetId,
+          label: rel.label || 'related_to',
+          strength: rel.strength || 0.8,
+        }),
+      });
+      if (relRes.ok) relStored++;
+    } catch {
+      // Individual relationship failures are non-fatal
+    }
+  }
+
   return NextResponse.json({
     success: true,
     entities,
     relationships: validRels,
+    persisted: { entities: stored, relationships: relStored },
     summary: `AI extracted ${entities.length} entities and ${validRels.length} relationships from "${fileName}"`,
     raw: parsed,
+    persistErrors: persistErrors.length > 0 ? persistErrors : undefined,
   });
 }
 

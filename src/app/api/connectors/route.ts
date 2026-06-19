@@ -73,6 +73,39 @@ export async function POST(req: NextRequest) {
     const { connector, action, config, payload } = body;
     const baseUrl = `${req.nextUrl.protocol}//${req.nextUrl.host}`;
 
+    // Handle file upload via dedicated ingest endpoint
+    if (action === 'upload-file') {
+      const fileData = payload?.fileData;
+      if (!fileData) return NextResponse.json({ error: 'No fileData provided' }, { status: 400 });
+      const fileName = payload?.fileName || `${connector}_data.json`;
+
+      // Call the dedicated ingest-file endpoint for direct entity persistence
+      const ingestUrl = `${baseUrl}/api/connectors/ingest-file`;
+      const ingestRes = await fetch(ingestUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileData, source: connector }),
+      });
+      const ingestResult = await ingestRes.json().catch(() => ({}));
+
+      // Also format text summary for display (like the other actions do)
+      const dataKeys = Object.keys(fileData).filter(k => Array.isArray(fileData[k]));
+      const totalEntries = dataKeys.reduce((s, k) => s + fileData[k].length, 0);
+      const rawData = `${connector.toUpperCase()} FILE UPLOAD: file=${fileName}\n`
+        + `\nFile contains: ${dataKeys.map(k => `${k}: ${fileData[k].length}`).join(', ')}`
+        + `\nTotal entries: ${totalEntries}`;
+
+      return NextResponse.json({
+        success: true,
+        connector,
+        action: 'upload-file',
+        results: [{ source: `${connector}/upload/${fileName}`, data: rawData }],
+        entitiesCreated: ingestResult.entitiesCreated || 0,
+        relationshipsCreated: ingestResult.relationshipsCreated || 0,
+        summary: `Uploaded ${fileName}: ${totalEntries} entries, ${ingestResult.entitiesCreated || 0} entities persisted`,
+      });
+    }
+
     switch (connector) {
       case 'twitter':    return handleTwitter(action, config, payload, baseUrl);
       case 'youtube':    return handleYouTube(action, config, payload, baseUrl);
@@ -836,7 +869,7 @@ async function handleWhatsApp(action: string, config: any, payload: any, baseUrl
   const errors: string[] = [];
   let rawData = '';
 
-  if (!rawText && action !== 'ingest-all') {
+  if (!rawText && action !== 'ingest-all' && action !== 'upload-file') {
     return NextResponse.json({ error: 'No WhatsApp export data provided. Pass rawText or data in payload.' }, { status: 400 });
   }
 
@@ -956,7 +989,7 @@ async function handleBulkImport(action: string, config: any, payload: any, baseU
   const rows = payload?.rows || [];
   const sourceName = payload?.sourceName || 'bulk_import';
 
-  if (rows.length === 0) {
+  if (rows.length === 0 && action !== 'upload-file') {
     return NextResponse.json({ error: 'No rows provided for import. Pass rows[] array.' }, { status: 400 });
   }
 

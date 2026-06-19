@@ -1106,6 +1106,111 @@ function PayloadInput({ connector, selectedAction, payload, setPayload, color }:
 }
 
 // ════════════════════════════════════════════════════════════════
+//  FILE UPLOAD SECTION — for each connector
+// ════════════════════════════════════════════════════════════════
+
+function FileUploadSection({ connector, label, color, token }: {
+  connector: string; label: string; color: string; token: string | null;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [fileName, setFileName] = useState('');
+  const [parsedData, setParsedData] = useState<any>(null);
+  const [entryCount, setEntryCount] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const { state, execute, reset } = useConnector();
+
+  const handleFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string);
+        setParsedData(data);
+        // Count entries — count top-level array or object keys
+        if (Array.isArray(data)) setEntryCount(data.length);
+        else if (typeof data === 'object') setEntryCount(Object.keys(data).length);
+        else setEntryCount(1);
+      } catch {
+        setError('Invalid JSON file. Please select a valid .json file.');
+        setParsedData(null);
+        setEntryCount(0);
+      }
+    };
+    reader.readAsText(file);
+    // Allow re-selecting same file
+    if (fileRef.current) fileRef.current.value = '';
+  }, []);
+
+  const handleUpload = useCallback(() => {
+    if (!parsedData) return;
+    execute(connector, 'upload-file', {}, {
+      fileData: parsedData,
+      fileName: fileName || `${connector}_data.json`,
+      ingest: true,
+    });
+  }, [parsedData, fileName, connector, execute]);
+
+  return (
+    <div className="mt-6 pt-4 border-t border-white/10">
+      <div className="flex items-center gap-2 mb-2">
+        <Upload className="w-3.5 h-3.5" style={{ color }} />
+        <span className="text-[9px] font-mono font-bold tracking-wider" style={{ color }}>
+          UPLOAD SYNTHETIC DATA
+        </span>
+        <span className="text-[7px] font-mono text-white/30">JSON file → {label}</span>
+      </div>
+      <p className="text-[7px] font-mono text-white/40 mb-3 leading-relaxed">
+        Upload a pre-prepared JSON file containing {label.toLowerCase()} data (profiles, posts, comments, etc.).
+        The data will be parsed and sent to the AI ontology ingestion pipeline.
+      </p>
+
+      <input ref={fileRef} type="file" accept=".json,application/json" onChange={handleFile} className="hidden" />
+
+      <div className="flex items-center gap-2 mb-3">
+        <button onClick={() => fileRef.current?.click()}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[8px] font-mono transition-colors"
+          style={{ backgroundColor: `${color}12`, color, border: `1px solid ${color}30` }}>
+          <FileJson className="w-3 h-3" /> CHOOSE FILE…
+        </button>
+        {fileName && (
+          <span className="text-[7px] font-mono text-white/50 truncate max-w-[300px]">{fileName}</span>
+        )}
+        {fileName && parsedData && (
+          <span className="text-[7px] font-mono text-white/40">
+            · {entryCount} entries
+          </span>
+        )}
+      </div>
+
+      {error && (
+        <div className="mb-2 px-3 py-1.5 rounded bg-[#FF1744]/15 border border-[#FF1744]/30">
+          <span className="text-[7px] font-mono text-[#FF1744]">{error}</span>
+        </div>
+      )}
+
+      {parsedData && (
+        <div className="flex items-center gap-2 mb-3">
+          <button onClick={handleUpload} disabled={state.status === 'loading'}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[8px] font-mono font-bold transition-colors disabled:opacity-30"
+            style={{ backgroundColor: `${color}18`, color, border: `1px solid ${color}40` }}>
+            {state.status === 'loading' ? <><Loader2 className="w-3 h-3 animate-spin" /> UPLOADING & INGESTING...</> : <><Upload className="w-3 h-3" /> UPLOAD & INGEST</>}
+          </button>
+          <button onClick={() => { setParsedData(null); setFileName(''); setEntryCount(0); reset(); }}
+            className="text-[7px] font-mono text-white/40 hover:text-white transition-colors">
+            CLEAR
+          </button>
+        </div>
+      )}
+
+      <ConnectorResults state={state} onClear={reset} />
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
 //  INDIVIDUAL CONNECTOR IMPLEMENTATIONS
 // ════════════════════════════════════════════════════════════════
 
@@ -1129,6 +1234,7 @@ function TwitterConnector({ token }: { token: string | null }) {
           { key: 'bearerToken', label: 'Bearer Token', placeholder: 'AAAAAAAAAAAA...', type: 'password' },
         ]}
       />
+      <FileUploadSection connector="twitter" label="Twitter" color="#1DA1F2" token={token} />
     </div>
   );
 }
@@ -1153,6 +1259,7 @@ function YouTubeConnector({ token }: { token: string | null }) {
           { key: 'apiKey', label: 'API Key', placeholder: 'AIzaSy...', type: 'password' },
         ]}
       />
+      <FileUploadSection connector="youtube" label="YouTube" color="#FF0000" token={token} />
     </div>
   );
 }
@@ -1177,6 +1284,7 @@ function FacebookConnector({ token }: { token: string | null }) {
           { key: 'accessToken', label: 'Access Token', placeholder: 'EAAC...', type: 'password' },
         ]}
       />
+      <FileUploadSection connector="facebook" label="Facebook" color="#1877F2" token={token} />
     </div>
   );
 }
@@ -1201,6 +1309,7 @@ function LinkedInConnector({ token }: { token: string | null }) {
           { key: 'accessToken', label: 'Access Token', placeholder: 'AQV...', type: 'password' },
         ]}
       />
+      <FileUploadSection connector="linkedin" label="LinkedIn" color="#0A66C2" token={token} />
     </div>
   );
 }
@@ -1222,6 +1331,7 @@ function WhatsAppConnector({ token }: { token: string | null }) {
         color="#25D366"
         token={token}
       />
+      <FileUploadSection connector="whatsapp" label="WhatsApp" color="#25D366" token={token} />
     </div>
   );
 }
@@ -1387,6 +1497,7 @@ function BulkImportConnector({ token }: { token: string | null }) {
 
       {/* Results */}
       <ConnectorResults state={state} onClear={reset} />
+      <FileUploadSection connector="bulk-import" label="Bulk Import" color="#D4AF37" token={token} />
     </div>
   );
 }
