@@ -6,6 +6,7 @@
  * ═══════════════════════════════════════════════════════════════
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { enrichText } from '@/lib/nlp/pipeline';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -162,7 +163,7 @@ Parse all entities and relationships from this data. Return ONLY the JSON.`;
 
   // Normalize entities with proper IDs
   const now = new Date().toISOString();
-  const entities = (parsed.entities || []).map((e: any) => ({
+  let entities = (parsed.entities || []).map((e: any) => ({
     id: e.id || `${e.type || 'entity'}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     type: e.type || 'person',
     domain: mapDomain(e.type || 'person'),
@@ -175,6 +176,62 @@ Parse all entities and relationships from this data. Return ONLY the JSON.`;
     createdAt: now,
     updatedAt: now,
   }));
+
+  // ── NLP Enrichment: run language detection, NER, keyword extraction,
+  //    toxicity scoring on every entity's text content ──
+  const nlpResults: Record<string, any> = {};
+  for (const entity of entities) {
+    // Build text to analyze from entity content
+    const textsToAnalyze = [
+      entity.label,
+      entity.description,
+      entity.properties?.text || entity.properties?.full_text || entity.properties?.message || '',
+      entity.properties?.bio || entity.properties?.displayName || '',
+      entity.properties?.content || '',
+      typeof entity.properties?.postText === 'string' ? entity.properties.postText : '',
+      typeof entity.properties?.commentText === 'string' ? entity.properties.commentText : '',
+    ].filter(Boolean);
+
+    if (textsToAnalyze.length === 0) continue;
+
+    const combinedText = textsToAnalyze.join(' ').slice(0, 5000);
+    if (combinedText.trim().length < 5) continue;
+
+    try {
+      const enrichment = enrichText(combinedText);
+
+      // Merge NLP properties into entity (don't overwrite explicit user values)
+      const np = enrichment.enrichedProperties;
+      entity.properties = {
+        ...enrichment.enrichedProperties,
+        ...entity.properties,  // entity props take precedence over NLP defaults
+        // Always set these merged values
+        nlp_enriched: true,
+        nlp_enriched_at: new Date().toISOString(),
+      };
+
+      // Always set these derived fields
+      entity.properties.nlp_language = enrichment.language.code;
+      entity.properties.nlp_toxicity_score = enrichment.toxicity.score;
+      entity.properties.nlp_entity_count = enrichment.entities.length;
+
+      // Add NLP tags
+      if (!entity.tags) entity.tags = [];
+      entity.tags.push(...enrichment.tags);
+      // Deduplicate tags
+      entity.tags = [...new Set(entity.tags)];
+
+      nlpResults[entity.id] = {
+        language: enrichment.language.code,
+        toxicity: enrichment.toxicity.score,
+        entities: enrichment.entities.length,
+        keywords: enrichment.keywords.slice(0, 5).map(k => k.term),
+      };
+    } catch (e: any) {
+      // NLP enrichment is non-fatal
+      console.warn(`[NLP] Enrichment error for ${entity.id}: ${e.message}`);
+    }
+  }
 
   const relationships = (parsed.relationships || []).map((r: any) => ({
     id: `rel_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -256,6 +313,10 @@ Parse all entities and relationships from this data. Return ONLY the JSON.`;
     summary: `AI extracted ${entities.length} entities and ${validRels.length} relationships from "${fileName}"`,
     raw: parsed,
     persistErrors: persistErrors.length > 0 ? persistErrors : undefined,
+    nlp: {
+      enriched: Object.keys(nlpResults).length,
+      results: Object.keys(nlpResults).length > 0 ? nlpResults : undefined,
+    },
   });
 }
 

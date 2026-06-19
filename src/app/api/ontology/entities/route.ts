@@ -70,6 +70,9 @@ export async function GET(req: NextRequest) {
       search: searchParams.get('search') || undefined,
       limit: parseInt(searchParams.get('limit') || '100', 10),
       offset: parseInt(searchParams.get('offset') || '0', 10),
+      nlpLanguage: searchParams.get('nlp_language') || undefined,
+      nlpToxicityMin: searchParams.get('nlp_toxicity_min') ? parseFloat(searchParams.get('nlp_toxicity_min')!) : undefined,
+      nlpEnriched: searchParams.get('nlp_enriched') === 'true' ? true : undefined,
     });
 
     return NextResponse.json(result);

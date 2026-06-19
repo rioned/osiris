@@ -14,6 +14,13 @@
  * ═══════════════════════════════════════════════════════════════
  */
 import { NextRequest, NextResponse } from 'next/server';
+import {
+  reconstructSocialGraph,
+  parseTwitterFeed,
+  parseYouTubeFeed,
+  parseGenericFeed,
+  type SocialInteraction,
+} from '@/lib/social-graph-reconstruction';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -65,6 +72,52 @@ async function ingestToOntology(rawData: string, fileName: string, fileType: str
   return res.json();
 }
 
+// ── Social Graph Reconstruction (post-processing step) ──
+
+/**
+ * Run social graph reconstruction on the raw connector output data.
+ * This promotes typed, directional relationships (follows, liked,
+ * commented_on, replied_to, shared, mentioned, tagged, etc.) into
+ * the ontology graph.
+ */
+async function runSocialReconstruction(
+  connector: string,
+  results: { source: string; data: string }[],
+): Promise<{ entitiesCreated: number; relationshipsCreated: number; totalInteractions: number; warnings: string[]; breakdown: Record<string, any> } | null> {
+  try {
+    const combined = results.map(r => r.data).join('\n\n');
+    if (!combined.trim()) return null;
+
+    let interactions: SocialInteraction[] = [];
+
+    switch (connector) {
+      case 'twitter':
+        interactions = parseTwitterFeed(combined);
+        break;
+      case 'youtube':
+        interactions = parseYouTubeFeed(combined);
+        break;
+      case 'facebook':
+      case 'linkedin':
+      case 'whatsapp':
+      case 'bulk-import':
+      case 'telegram':
+        interactions = parseGenericFeed(combined, connector);
+        break;
+      default:
+        interactions = parseGenericFeed(combined, 'generic');
+    }
+
+    if (interactions.length === 0) return null;
+
+    const result = await reconstructSocialGraph(interactions, `connector_${connector}`);
+    return result;
+  } catch (e: any) {
+    console.warn(`[SocialReconstruction] ${connector}: ${e.message}`);
+    return null;
+  }
+}
+
 // ── Main POST handler ──
 
 export async function POST(req: NextRequest) {
@@ -107,12 +160,60 @@ export async function POST(req: NextRequest) {
     }
 
     switch (connector) {
-      case 'twitter':    return handleTwitter(action, config, payload, baseUrl);
-      case 'youtube':    return handleYouTube(action, config, payload, baseUrl);
-      case 'facebook':   return handleFacebook(action, config, payload, baseUrl);
-      case 'linkedin':   return handleLinkedIn(action, config, payload, baseUrl);
-      case 'whatsapp':   return handleWhatsApp(action, config, payload, baseUrl);
-      case 'bulk-import': return handleBulkImport(action, config, payload, baseUrl);
+      case 'twitter': {
+        const resp = await handleTwitter(action, config, payload, baseUrl);
+        const data = await resp.json();
+        if (data.success && data.results?.length > 0) {
+          const socialResult = await runSocialReconstruction('twitter', data.results);
+          if (socialResult) data.socialReconstruction = socialResult;
+        }
+        return NextResponse.json(data, { status: resp.status });
+      }
+      case 'youtube': {
+        const resp = await handleYouTube(action, config, payload, baseUrl);
+        const data = await resp.json();
+        if (data.success && data.results?.length > 0) {
+          const socialResult = await runSocialReconstruction('youtube', data.results);
+          if (socialResult) data.socialReconstruction = socialResult;
+        }
+        return NextResponse.json(data, { status: resp.status });
+      }
+      case 'facebook': {
+        const resp = await handleFacebook(action, config, payload, baseUrl);
+        const data = await resp.json();
+        if (data.success && data.results?.length > 0) {
+          const socialResult = await runSocialReconstruction('facebook', data.results);
+          if (socialResult) data.socialReconstruction = socialResult;
+        }
+        return NextResponse.json(data, { status: resp.status });
+      }
+      case 'linkedin': {
+        const resp = await handleLinkedIn(action, config, payload, baseUrl);
+        const data = await resp.json();
+        if (data.success && data.results?.length > 0) {
+          const socialResult = await runSocialReconstruction('linkedin', data.results);
+          if (socialResult) data.socialReconstruction = socialResult;
+        }
+        return NextResponse.json(data, { status: resp.status });
+      }
+      case 'whatsapp': {
+        const resp = await handleWhatsApp(action, config, payload, baseUrl);
+        const data = await resp.json();
+        if (data.success && data.results?.length > 0) {
+          const socialResult = await runSocialReconstruction('whatsapp', data.results);
+          if (socialResult) data.socialReconstruction = socialResult;
+        }
+        return NextResponse.json(data, { status: resp.status });
+      }
+      case 'bulk-import': {
+        const resp = await handleBulkImport(action, config, payload, baseUrl);
+        const data = await resp.json();
+        if (data.success && data.results?.length > 0) {
+          const socialResult = await runSocialReconstruction('bulk-import', data.results);
+          if (socialResult) data.socialReconstruction = socialResult;
+        }
+        return NextResponse.json(data, { status: resp.status });
+      }
       default:
         return NextResponse.json({ error: `Unknown connector: ${connector}` }, { status: 400 });
     }

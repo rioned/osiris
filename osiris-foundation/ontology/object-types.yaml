@@ -146,3 +146,46 @@ object_types:
       uri:         { type: string, required: true }   # minio:// reference
       transcript:  { type: string, embed: true }       # OCR/ASR output
       caption:     { type: string, searchable: true, embed: true }
+
+  # ── SOCIAL ENTITY TYPES (Social Graph Reconstruction) ────────
+  social_post:
+    domain: SOCIAL
+    display_name: "Social Post"
+    icon: "message-square"
+    color: "#FF6D00"
+    properties:
+      platform:  { type: string, required: true, searchable: true }
+      post_id:   { type: string, required: true, searchable: true }
+      author:    { type: string, searchable: true }
+      url:       { type: string }
+      text:      { type: string, searchable: true, embed: true }
+      timestamp: { type: date }
+      language:  { type: string }
+      visibility: { type: enum, values: [public, private, followers_only, friends_only] }
+      engagement_count: { type: number, min: 0 }
+
+  social_comment:
+    domain: SOCIAL
+    display_name: "Social Comment"
+    icon: "message-circle"
+    color: "#E040FB"
+    properties:
+      platform:    { type: string, required: true, searchable: true }
+      comment_id:  { type: string, required: true, searchable: true }
+      author:      { type: string, searchable: true }
+      text:        { type: string, searchable: true, embed: true }
+      timestamp:   { type: date }
+      parent_type: { type: enum, values: [post, comment] }
+
+  social_group:
+    domain: SOCIAL
+    display_name: "Social Group"
+    icon: "users"
+    color: "#39FF14"
+    properties:
+      platform:    { type: string, required: true, searchable: true }
+      group_id:    { type: string, required: true, searchable: true }
+      name:        { type: string, required: true, searchable: true }
+      description: { type: string, embed: true }
+      member_count: { type: number, min: 0 }
+      visibility:  { type: enum, values: [public, private, secret] }

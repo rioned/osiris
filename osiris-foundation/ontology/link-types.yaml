@@ -38,19 +38,86 @@ link_types:
     display_name: "Member Of"
     directed: true
     source_types: [person]
-    target_types: [organization]
+    target_types: [organization, social_group]
 
   mentioned_in:
     display_name: "Mentioned In"
     directed: true
     source_types: [person, organization, place, vehicle, vessel, aircraft, network_node]
-    target_types: [media, event]
+    target_types: [media, event, social_post]
 
   same_as:
     display_name: "Same As (resolved duplicate)"
     directed: false
     source_types: ["*"]
     target_types: ["*"]
+
+  # ── Social Interaction Graph: typed, directional relationships ──
+  # These turn scattered social feed data into a queryable network
+  # that the graph-analytics layer operates on.
+
+  follows:
+    display_name: "Follows"
+    directed: true
+    description: "User A follows user B on a social platform"
+    source_types: [person, social_profile]
+    target_types: [person, social_profile]
+
+  friend_of:
+    display_name: "Friend Of"
+    directed: false
+    description: "Bidirectional friendship connection between two users"
+    source_types: [person, social_profile]
+    target_types: [person, social_profile]
+
+  liked:
+    display_name: "Liked"
+    directed: true
+    description: "User liked a post, comment, or media item"
+    source_types: [person, social_profile]
+    target_types: [social_post, social_comment, media]
+
+  commented_on:
+    display_name: "Commented On"
+    directed: true
+    description: "User posted a comment on a piece of content"
+    source_types: [person, social_profile]
+    target_types: [social_post, media]
+
+  replied_to:
+    display_name: "Replied To"
+    directed: true
+    description: "A comment is a reply to another comment or post"
+    source_types: [social_comment]
+    target_types: [social_comment, social_post]
+
+  shared:
+    display_name: "Shared"
+    directed: true
+    description: "User reshared/reposted content to their network"
+    source_types: [person, social_profile]
+    target_types: [social_post, media]
+
+  mentioned:
+    display_name: "Mentioned"
+    directed: true
+    description: "User was @-mentioned in a post or comment"
+    source_types: [social_post, social_comment]
+    target_types: [person, social_profile]
+
+  tagged:
+    display_name: "Tagged"
+    directed: true
+    description: "User was tagged (photo, post, check-in)"
+    source_types: [social_post, media]
+    target_types: [person, social_profile]
+
+  works_at:
+    display_name: "Works At"
+    directed: true
+    description: "Person is employed by or affiliated with an organization"
+    source_types: [person]
+    target_types: [organization]
 
 
 # ── Governed write-back actions (every one is audited) ──────────

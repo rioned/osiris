@@ -139,6 +139,12 @@ export async function getEntities(options?: {
   search?: string;
   limit?: number;
   offset?: number;
+  /** Filter by detected language (e.g. 'en', 'fr', 'ru') */
+  nlpLanguage?: string;
+  /** Filter by minimum toxicity score (0–1) */
+  nlpToxicityMin?: number;
+  /** Only return entities that have been NLP-enriched */
+  nlpEnriched?: boolean;
 }): Promise<{ entities: PersonalEntity[]; total: number }> {
   await ensureStore();
 
@@ -146,6 +152,12 @@ export async function getEntities(options?: {
     let filtered = [...memStore.entities];
     if (options?.type) filtered = filtered.filter(e => e.type === options.type);
     if (options?.domain) filtered = filtered.filter(e => e.domain === options.domain as PersonalDomain);
+    if (options?.nlpLanguage) filtered = filtered.filter(e => e.properties?.nlp_language === options.nlpLanguage);
+    if (options?.nlpToxicityMin !== undefined) filtered = filtered.filter(e => {
+      const score = parseFloat(e.properties?.nlp_toxicity_score);
+      return !isNaN(score) && score >= (options.nlpToxicityMin ?? 0);
+    });
+    if (options?.nlpEnriched) filtered = filtered.filter(e => e.properties?.nlp_enriched === true);
     if (options?.search) {
       const q = options.search.toLowerCase();
       filtered = filtered.filter(e =>
@@ -176,6 +188,18 @@ export async function getEntities(options?: {
     conditions.push(`(label ILIKE $${paramIdx} OR description ILIKE $${paramIdx} OR $${paramIdx} = ANY(tags))`);
     params.push(`%${options.search}%`);
     paramIdx++;
+  }
+  // NLP property filters
+  if (options?.nlpLanguage) {
+    conditions.push(`properties->>'nlp_language' = $${paramIdx++}`);
+    params.push(options.nlpLanguage);
+  }
+  if (options?.nlpToxicityMin !== undefined) {
+    conditions.push(`COALESCE((properties->>'nlp_toxicity_score')::float, 0) >= $${paramIdx++}`);
+    params.push(options.nlpToxicityMin);
+  }
+  if (options?.nlpEnriched) {
+    conditions.push(`properties->>'nlp_enriched' = 'true'`);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
