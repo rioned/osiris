@@ -21,6 +21,7 @@ import LiveAlerts from '@/components/LiveAlerts';
 import GothamDashboard from '@/components/GothamDashboard';
 import AIChatPanel from '@/components/AIChatPanel';
 import CorrelationPanel from '@/components/CorrelationPanel';
+import DataFusionPanel from '@/components/DataFusionPanel';
 import WorkspacePanel from '@/components/WorkspacePanel';
 import PlaybookPanel from '@/components/PlaybookPanel';
 import { evaluatePlaybooks, type Playbook } from '@/lib/playbook-engine';
@@ -1060,6 +1061,9 @@ function saveOsirisState(v: any) {
           data={data}
           onLocate={(lat, lng) => setFlyToLocation({ lat, lng, ts: Date.now() })}
         />
+
+        {/* Data Fusion — unified structured + unstructured search & ingest */}
+        <DataFusionPanel onLocate={(lat, lng) => setFlyToLocation({ lat, lng, ts: Date.now() })} />
 
         {/* Watchlist Button */}
         <div className="relative">

@@ -29,7 +29,14 @@ export type PersonalEntityType =
   | 'mac_address'
   | 'wifi_network'
   | 'event'
-  | 'image_media';
+  | 'image_media'
+  // ── Data Fusion additions (see lib/store/document-store.ts) ──
+  // Entity kinds NER extraction resolves out of ingested unstructured
+  // text, plus `media` for the ingested document node itself.
+  | 'organization'
+  | 'email_address'
+  | 'network_node'
+  | 'media';
 
 // ── Core Personal Entity ──
 export interface PersonalEntity {
@@ -96,6 +103,10 @@ export const PERSONAL_TYPE_COLORS: Record<PersonalEntityType, string> = {
   wifi_network: '#00BCD4',
   event: '#FF9500',
   image_media: '#E040FB',
+  organization: '#C9A227',
+  email_address: '#4F6FFF',
+  network_node: '#00C2A8',
+  media: '#9B9B9B',
 };
 
 export const PERSONAL_DOMAIN_COLORS: Record<PersonalDomain, string> = {
@@ -121,6 +132,10 @@ export const PERSONAL_TYPE_LABELS: Record<PersonalEntityType, string> = {
   wifi_network: 'WiFi Network',
   event: 'Event',
   image_media: 'Image/Media',
+  organization: 'Organization',
+  email_address: 'Email Address',
+  network_node: 'Network Node',
+  media: 'Document',
 };
 
 // ── LocalStorage Store ──
@@ -531,6 +546,10 @@ export const PERSONAL_TYPE_GLYPHS: Record<PersonalEntityType, string> = {
   wifi_network: 'WiFi',
   event: 'EV',
   image_media: 'IMG',
+  organization: 'ORG',
+  email_address: '✉',
+  network_node: 'NET',
+  media: 'DOC',
 };
 
 // Common relationship labels offered when wiring two nodes together by hand.

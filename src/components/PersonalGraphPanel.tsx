@@ -1168,6 +1168,20 @@ function AddEntityForm({ onAdd, onClose }: {
       { key: 'source', label: 'Source' }, { key: 'url', label: 'URL' },
       { key: 'faces', label: 'Faces Detected' }, { key: 'textExtracted', label: 'Text Extracted' },
     ],
+    organization: [
+      { key: 'reg_number', label: 'Registration Number' }, { key: 'country', label: 'Country' },
+    ],
+    email_address: [
+      { key: 'address', label: 'Email Address' }, { key: 'breached_in', label: 'Breached In (comma-sep)' },
+    ],
+    network_node: [
+      { key: 'kind', label: 'Kind (ip/domain/mac/wifi_ssid/asn)' }, { key: 'value', label: 'Value' },
+      { key: 'threat', label: 'Threat Score' },
+    ],
+    media: [
+      { key: 'kind', label: 'Kind (image/document/audio/video)' }, { key: 'uri', label: 'URI' },
+      { key: 'transcript', label: 'Transcript' }, { key: 'caption', label: 'Caption' },
+    ],
   };
 
   const handleSubmit = () => {

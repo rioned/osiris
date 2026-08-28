@@ -337,7 +337,11 @@ export function extractNamedEntities(text: string): NamedEntity[] {
 
   // People: "Capitalized Capitalized" in specific contexts (not start of sentence)
   // e.g. "by John Smith", "with Jane Doe", "said John Smith", "according to John Smith"
-  const personContextRe = /\b(?:by|with|said|called|named|known.as|according.to|interviewed|appointed|contacted|led.by|founded.by|attributed.to|blamed|praised|criticized|fired|hired|promoted)\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b/gi;
+  // No `i` flag: the trigger words are intentionally case-sensitive (lowercase,
+  // as they appear mid-sentence) so [A-Z] in the capture groups still means
+  // "capitalized" — an `i` flag here would let it match lowercase words too
+  // (e.g. "with representatives from" mis-tagged as a person name).
+  const personContextRe = /\b(?:by|with|said|called|named|known.as|according.to|interviewed|appointed|contacted|led.by|founded.by|attributed.to|blamed|praised|criticized|fired|hired|promoted)\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b/g;
   while ((m = personContextRe.exec(text)) !== null) {
     const full = `${m[1]} ${m[2]}`;
     add({ text: full, type: 'person', start: m.index + m[0].indexOf(m[1]), end: m.index + m[0].indexOf(m[1]) + full.length, confidence: 0.8 });
